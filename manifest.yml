@@ -1,0 +1,87 @@
+---
+applications:
+##
+## The Eureka Service Registry 
+##
+- name: ((unique-prefix))-eureka-server
+  memory: 1024M
+  disk_quota: 512M
+  instances: 1
+  buildpacks:
+    - java_buildpack
+  path: ./eureka.service/target/eureka.service-0.0.1-SNAPSHOT.jar
+  
+  routes: 
+  - route: ((eureka-server-route)) 
+
+##
+## Address Service
+##
+- name: ((unique-prefix))-address-service
+  memory: 1024M
+  disk_quota: 512M
+  instances: 1
+  buildpacks:
+    - java_buildpack
+  path: ./address.service/target/address.service-0.0.1-SNAPSHOT.jar
+  
+  routes: 
+  - route: ((unique-prefix))-address-service.((cf-domain))
+  
+  env:
+    spring.profiles.active: cloud # activate the spring profile named 'cloud'.
+    eureka-server-url: https://((eureka-server-route)) # referenced from application.yml 
+
+##
+## Address Service Client
+##
+- name: ((unique-prefix))-address-service-client
+  memory: 1024M
+  disk_quota: 512M
+  instances: 1
+  buildpacks:
+    - java_buildpack
+  path: ./address.service.client/target/address.service.client-0.0.1-SNAPSHOT.jar
+  
+  routes: 
+  - route: ((unique-prefix))-address-service-client.((cf-domain))
+  
+  env:
+    spring.profiles.active: cloud # activate the spring profile named 'cloud'.
+    eureka-server-url: https://((eureka-server-route)) # referenced from application.yml 
+
+##
+## Employee Service
+##
+- name: ((unique-prefix))-employee-service
+  memory: 1024M
+  disk_quota: 512M
+  instances: 1
+  buildpacks:
+    - java_buildpack
+  path: ./employee.service/target/employee.service-0.0.1-SNAPSHOT.jar
+  
+  routes: 
+  - route: ((unique-prefix))-employee-service.((cf-domain))
+  
+  env:
+    spring.profiles.active: cloud # activate the spring profile named 'cloud'.
+    eureka-server-url: https://((eureka-server-route)) # referenced from application.yml 
+
+##
+## Employee Service Client
+##
+- name: ((unique-prefix))-employee-service-client
+  memory: 1024M
+  disk_quota: 512M
+  instances: 1
+  buildpacks:
+    - java_buildpack
+  path: ./employee.service.client/target/employee.service.client-0.0.1-SNAPSHOT.jar
+  
+  routes: 
+  - route: ((unique-prefix))-employee-service-client.((cf-domain))
+  
+  env:
+    spring.profiles.active: cloud # activate the spring profile named 'cloud'.
+    eureka-server-url: https://((eureka-server-route)) # referenced from application.yml 

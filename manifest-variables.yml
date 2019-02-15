@@ -1,0 +1,4 @@
+---
+unique-prefix: <.a unqiue ID> # A unique prefix.
+eureka-server-route: <.a unique ID>-eureka-server.<.your.cf.domain>
+cf-domain: <.your.cf.domain> # The domain of your CF account.

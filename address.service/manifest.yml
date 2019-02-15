@@ -1,0 +1,16 @@
+---
+applications:
+- name: ((unique-prefix))-address-service
+  memory: 1024M
+  disk_quota: 512M
+  instances: 1
+  buildpacks:
+    - java_buildpack
+  path: ./target/address.service-0.0.1-SNAPSHOT.jar
+  
+  routes: 
+  - route: ((unique-prefix))-address-service.((cf-domain))
+  
+  env:
+    spring.profiles.active: cloud # activate the spring profile named 'cloud'.
+    eureka-server-url: https://((eureka-server-route))

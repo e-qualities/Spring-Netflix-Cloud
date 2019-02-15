@@ -1,0 +1,39 @@
+---
+spring:
+  application:
+    name: address-service-client
+
+server:
+  port: ${PORT:8081}
+
+eureka:
+  client: 
+    serviceUrl:
+      defaultZone: http://localhost:8761/eureka
+  instance:
+    healthcheck: 
+      enabled: true
+      
+---
+spring.profiles: cloud
+
+eureka:
+  client: 
+    serviceUrl:
+      defaultZone: ${eureka-server-url}/eureka  # URL of the form https://<unique prefix>-eureka-server.cfapps.eu10.hana.ondemand.com/eureka
+                                                # Resolved from environment set in manifest.yml
+  instance: 
+    homePageUrl:          https://${vcap.application.uris[0]:localhost}/   
+    statusPageUrl:        https://${vcap.application.uris[0]:localhost}/actuator/info 
+    healthCheckUrl:       https://${vcap.application.uris[0]:localhost}/actuator/health
+    secureHealthCheckUrl: https://${vcap.application.uris[0]:localhost}/actuator/health
+    hostname:             ${vcap.application.uris[0]:localhost}
+    nonSecurePortEnabled: false
+    securePortEnabled:    true
+    securePort:           443
+    #nonSecurePort:       80
+    #preferIpAddress:     true
+    #metadataMap:
+    #  instanceId: ${vcap.application.instance_id:-}
+
+
