@@ -74,9 +74,22 @@ Table of Contents
       * [Using Clusters Properly](#using-clusters-properly)
          * [Clustering by Landscape](#clustering-by-landscape)
          * [Clustering by Service](#clustering-by-service)
+         * [Clustering by AWS Auto-Scaling Groups](#clustering-by-aws-auto-scaling-groups)
          * [Debugging Cluster Configurations](#debugging-cluster-configurations)
       * [Registering Turbine Streams with Hystrix Dashboard](#registering-turbine-streams-with-hystrix-dashboard)
       * [Turbine Limitations](#turbine-limitations)
+   * [Ribbon](#ribbon)
+      * [Ribbon Concepts](#ribbon-concepts)
+      * [Integration with Hystrix](#integration-with-hystrix)
+      * [Server Lists and Zone-based Matching](#server-lists-and-zone-based-matching)
+      * [Eureka Integration](#eureka-integration)
+      * [Integrating Ribbon](#integrating-ribbon)
+         * [Adding Ribbon Dependencies to pom.xml](#adding-ribbon-dependencies-to-pomxml)
+         * [Ribbon Configurations](#ribbon-configurations)
+         * [Adjusting Hystrix Timeouts](#adjusting-hystrix-timeouts)
+         * [Maintaining Zone Information](#maintaining-zone-information)
+      * [Ribbon in Action](#ribbon-in-action)
+         * [Note for Cloud Foundry Deployments](#note-for-cloud-foundry-deployments)
    * [What's Next?](#whats-next)
    * [References](#references)
 
@@ -1559,12 +1572,338 @@ For scenarios, where you deploy a new service, this means you also need to exten
 This can be a nuisance if you are running more than one Turbine server, e.g. when using different clustering approaches.
 Unfortunately, this will not be fixed in the future. But it may be an option to write your own Turbine configurations as Spring beans and provide a REST endpoint that allows you to modify them at runtime. See the [Spring Cloud Turbine documentation](https://cloud.spring.io/spring-cloud-netflix/single/spring-cloud-netflix.html#_turbine) and the [Netflix Turbine documentation](https://github.com/Netflix/Turbine/wiki/Configuration-(1.x)) for more information.
 
+# Ribbon
+
+Ribbon is a client-side loadbalancer for HTTP and TCP originally created by [Netflix](https://github.com/Netflix/ribbon/wiki) and integrated into [Spring Cloud Netflix](https://cloud.spring.io/spring-cloud-netflix/single/spring-cloud-netflix.html#spring-cloud-ribbon).  
+Ribbon uses an HTTP client implementation to send requests and requests sent through Ribbon will be distributed among the servers Ribbon uses for load balancing.
+
+Ribbon is the underlying technology used by Zuul, FeignClient and *loadbalanced* REST Templates. Furthermore, Ribbon integrates with Eureka to get the list of service instances (i.e. servers) that it uses to balance load between.
+
+Ribbon has built-in retry support, an own integrated circuit breaker logic and is highly flexible - not only using configurations, but also custom load balancing rules. The latter can, for example, be used to implement canary testing scenarios.
+
+Ribbon's main purpose is to implement client-side loadbalancing, but it can also be configured as a pure HTTP client implementation. In such a case, you configure Ribbon not to retry any failed requests (which is the default) and to use a server list with only one server.
+
+In the following we will explain how Ribbon works, and what adjustments are necessary in the projects of this tutorial to profit from Ribbon.
+
+## Ribbon Concepts
+
+Ribbon - like any other load balancer - uses a list of servers to send requests to. That list can come from a variety of sources, the most prominent being 
+
+* a service registry like Eureka
+* a configuration file like `application.yml`, using the `ribbon.listOfServers` property
+* a remote configuration source e.g. Archaius or Spring Cloud Config Server
+
+In this setup we are using Eureka to provide the server list to Ribbon. As the figure below shows, the "servers" are actually service instances. They can be running on the same server or on different ones.
+
+![Ribbon General Working Principle](.documentation/ribbon-general.png)
+
+Once Ribbon has the list of servers, it can start distributing the request load to them. How Ribbon does that, is determined on different levels - each of which is configurable.
+
+**ClientConfig** - Implementations of `IClientConfig`. Configurations can be specified globally, or per *client*. For Ribbon, a *client* is just an identifier and corresponds to a service. In combination with Eureka, the client is the identifier of the service as registered in Eureka and used e.g. as the `name` of the `@FeignClient`. Usually, you configure Ribbon in `application.yml` using properties like `<clientName>.ribbon.<property>` for client-specific configurations or `ribbon.<property>` for global ones. You can also pass an instance of `ClientConfig` to Ribbon, however, in case you need to programmatically control Ribbons behavior.
+
+**ServerList** - `IServerList` implementations can programmatically provide the list of servers, Ribbon should balance load to. So you could implement loading server lists from XML just as well as from an SMTP server. You can find the default implementations [here](https://github.com/Netflix/ribbon/wiki/Working-with-load-balancers#serverlist).
+
+**Ping** - `IPing` implementations are used by Ribbon to check the health of servers it intends to balance load to. Ribbon keeps a connection status for each server it considers for load balancing. That status information is also used for an internal circuit breaker implementation.
+
+**ServerListFilter** - A `ServerListFilter` implementation can be used to reduce the list of servers returned by `IServerList` implementations to the viable set used for load balancing.  
+Examples for such use cases are filters that take the geographical location of client and server into account. For example, if the service client is located in the US region, service instances that are not located regions other than the US should rather not be used, as the latency would be too high.
+
+**ServerListUpdater** - Implementation of `ServerListUpdater` can be used to implement strategies to refresh the list of servers.
+
+**Rule** - Implementation of `IRule` can be used to implement a load balancing strategy, for example based on request context information (e.g. headers, session cookies, etc.). Ribbon comes with a set of default rules, among them `RoundRobinRule`, `AvailabilityFilteringRule` and `WeightedResponseTimeRule` (see [here](https://github.com/Netflix/ribbon/wiki/Working-with-load-balancers#common-rules))
+
+**LoadBalancer** - In case rules are not flexible enough, you can write your own `ILoadBalancer` implementation.
+
+Implementations of the above interfaces and classes can be made known to Ribbon - globally or per client - using the following properties in `application.yml`:
+
+```
+<clientName>.ribbon.NFLoadBalancerClassName: Should implement ILoadBalancer
+<clientName>.ribbon.NFLoadBalancerRuleClassName: Should implement IRule
+<clientName>.ribbon.NFLoadBalancerPingClassName: Should implement IPing
+<clientName>.ribbon.NIWSServerListClassName: Should implement ServerList
+<clientName>.ribbon.NIWSServerListFilterClassName: Should implement ServerListFilter
+```
+You can also use Spring Bean Configurations to set these classes, see [here](https://cloud.spring.io/spring-cloud-netflix/single/spring-cloud-netflix.html#_customizing_the_ribbon_client).
+
+## Integration with Hystrix
+
+An interesting question is how Ribbon integrates with Hystrix.  
+
+After all, Hystrix is a circuit breaker framework intended to keep services responsive by not propagating errors from downstream dependencies to their clients.  
+Hystrix does that by wrapping access to downstream dependency services into `HystrixCommands` and keeping statistics about success and failure of executing them.  If statistics indicate that the downstream dependency service is down or has serious issues, the circuit breaker kicks in and uses a local fallback instead of connecting to the (remote) downstream service.
+
+With Ribbon, this becomes a little more complex, since there is technically not **one** downstream service, but several instances of it. Ribbon distributes outgoing requests between those instances according to rules that are transparent / unknown to Hystrix.  
+Thus, if a `HystrixCommand` is executed, it is not known to Hystrix which service instance the command is executed against - and it may well be, that the next time the command is executed another service instance is being used. Doesn't that render Hystrix' statistics irrelevant, thus undermining the entire idea of circuit breaking?
+
+The answer is no. And that is because Ribbon also has an internal circuit breaking mechanism. The figure below depicts this.
+
+![Ribbon and Circuit Breaking](.documentation/ribbon-hystrix.png)
+
+The figure above shows a typical scenario:  
+*Address-Service* is a service that is registered to a (Eureka) Service Registry. It consists of 3 service instances, each of which are identical and used to balance request loads and secure availability.
+
+Ribbon is used as the load balancer and receives its server list from Eureka, thus receiving the addresses of the *instances* of Address-Service. Ribbon's server list filter may reduce the list of services to the eligible ones to serve a client (e.g. based on the deployment zone). Eventually, a *loadbalancing rule* will decide which service instance will be used to send client requests to - this could be a round-robin rule or something more sophisticated. The request will then be sent to the instance using an HTTP client implementation.
+
+Ribbon keeps internal statistics about the availability and health (using an `IPing` implementation) of the service instance and - in case the instance is unreliable - will break the internal circuit to the instance. 
+
+Effectively, this (temporarily) removes the service instance from the list of loadbalancing candidates. **At the same time it ensures that requests sent from a client will only be loadbalanced to responsive service instances.**  
+This is essential for Hystrix!
+
+Hystrix wraps requests from an *Address Service Client* to the *Address-Service* into `HystrixCommand`s. The requests are made through Ribbon eventually, and Hystrix (as well as the Address Service Client) are unaware of the number or health status of underlying Address-Service *instances* - that is something Ribbon will take care of.  
+Thus, all a `HystrixCommand` sees is a *service* - not its instances.  
+
+With Ribbon taking care of the availability and proper loadbalancing to healthy service instances, Hystrix either sees a healthy service - if Ribbon found at least one healthy instance to send the request to - or an unhealthy service - if Ribbon only has foul or no service instances left to choose from. In the latter case, Ribbon's HTTP client will report an error.
+
+With that, Hystrix can now keep connection statistics on *service level* and provide a circuit breaking mechanism on a higher level of abstraction!
+
+That btw. is also one of the reasons, why `@HystrixCommand` annotations should use `commandKey`s that describe the *service* (and endpoint) the command calls and make no assumptions about the number of service instances behind it.  
+It also motivates why error timeouts of Ribbon and Hystrix need to be properly aligned: Hystrix should kick in last - giving Ribbon enough time to detect a connection error and possibly try another, responsive service instance.   
+Generally, this means that Hystrix timeouts should be long enough to encompass Ribbon's timeouts and possible retry attempts.
+
+You can verify this behavior for yourself looking at the following classes and documentation:
+* [`LoadBalancerCommand`](https://github.com/Netflix/ribbon/blob/master/ribbon-loadbalancer/src/main/java/com/netflix/loadbalancer/reactive/LoadBalancerCommand.java) - this class shows how Ribbon will retry requests (based on configuration)
+* [`ZoneAvoidanceRule`](https://github.com/Netflix/ribbon/blob/master/ribbon-loadbalancer/src/main/java/com/netflix/loadbalancer/ZoneAvoidanceRule.java ) - this class shows the load balancing based on availability of a service instance.  
+  It is the default rule configured by Spring as described [here](https://cloud.spring.io/spring-cloud-netflix/single/spring-cloud-netflix.html#_customizing_the_ribbon_client).  
+* Availability is determined (among others) by an internal circuit breaker mechanism as described [here](https://github.com/Netflix/ribbon/wiki/Working-with-load-balancers#availabilityfilteringrule).  
+`ZoneAvoidanceRule` uses a `CompositePredicate` to distinguish if a service instance is considered for balancing load. The `CompositePredicate` checks if 
+  * the service instance is within the same (availability) zone as the client, and
+  * if the service instance is available  
+* In other words, Ribbon keeps stats about service instances (and if they fail too often) opens the circuit to them and does no longer take them into account for load balancing.
+
+## Server Lists and Zone-based Matching
+
+A very interesting feature of Ribbon (and with it Zuul) is that it supports load balancing based on client and service instance metadata. You can create your own rules, of course, but already out of the box it is possible to assign **zone** metadata to clients and service instance that will be used by Ribbon to match service instances to balance the client's load to (see [Integrating Ribbon](#integrating-ribbon) below).
+
+![Ribbon Zone Awareness](.documentation/ribbon-zone-awareness.png)
+
+The figure above motivates a use case where zone-based client-service-instance-matching can be relevant.
+
+Imagine a global service deployment scenario. Eureka can be used to form a cluster that can spread across various regions and availability zones, essentially making a global deployment of your services possible.  
+Instances of *Address-Service* can therefore be deployed in a data center in EU-Frankfurt just as well as on the west coast of the US. Looking at Eureka's service registry list, you will see **all** instances (those from the US and those running in Europe) since data is replicated among Eureka cluster instances.
+
+Now, if a client in the US wants to send a request to *Address-Service* it will do so using Ribbon. Ribbon will retrieve the service instance list from Eureka and now needs to select / filter those instances eligible for sending the client requests to. Without information about the deployment zone the service instance resides in, latency would be uncontrollable. In other words, you want to make sure that clients sending requests from the westcoast of the US are served by service instances that are also deployed near it. That's where the zone information metadata comes in - and provided that both client and service instances advertise this metadata through Eureka, Ribbon will automatically select the service instances that reside in the same zone. If no instances are available for the given zone a pre-defined fallback mechanism is used - so clients might still be served by instances from another zone. Ribbon just tries to avoid that.
+
+## Eureka Integration
+
+Ribbon integrates nicely with Eureka. When Eureka is on the classpath, Spring Cloud Netflix will automatically bootstrap the implementations of `IPing`, `ServerList`, `ServerListFilter`, `ServerListUpdater`, `IRule` and `ILoadBalancer` that connect to Eureka.
+
+This results in:
+* The server list will be loaded from Eureka
+* The health status (ping) is taken from the heartbeat information maintained by Eureka
+* Zone information will be retrieved from Eureka client metadata
+
+For more information see [details here](https://cloud.spring.io/spring-cloud-netflix/multi/multi_spring-cloud-ribbon.html#_using_ribbon_with_eureka).
+
+## Integrating Ribbon
+
+To integrate Ribbon, we performed the following steps:
+
+* Make sure either `spring-cloud-starter-netflix-eureka-client` or `spring-cloud-starter-netflix-ribbon` is declared as a dependency in `pom.xml`
+* Make sure `spring-retry` is declared as dependency in `pom.xml` (if Ribbon should retry failed requests).
+* Add Ribbon configurations to service clients' `application.yml`. This includes...
+  * Maintaining Ribbon timeouts and retry behavior
+  * Adjusting Hystrix timeouts to Ribbon timeouts
+  * Maintaining (deployment) zone information for services and service clients as metadata
+
+In the following we will describe these steps in more detail.
+
+### Adding Ribbon Dependencies to `pom.xml`
+
+When your service or client is registering with Eureka, you will have `spring-cloud-starter-netflix-eureka-client` declared as a dependency in `pom.xml`. That implicitly includes Ribbon on the classpath. If you don't use Eureka, you will want to add `spring-cloud-starter-netflix-ribbon` instead.
+
+Furthermore, Ribbon can be configured to *retry* failed requests. Generally, this adds to resiliency of your services and clients and we recommend using this feature. If you are using `@LoadBalanced` `RestTemplate`s you need to add `org.springframework.retry:spring-retry` to your `pom.xml`. 
+
+Thus, the resulting [`pom.xml`](./address.service.client/pom.xml) should include the following dependencies:
+
+```xml
+    <dependency>
+      <groupId>org.springframework.cloud</groupId>
+      <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
+    </dependency>
+
+    <!-- Required for Ribbon-Loadbalanced REST Templates to do retries. -->
+    <dependency>
+        <groupId>org.springframework.retry</groupId>
+        <artifactId>spring-retry</artifactId>
+    </dependency>
+```
+
+Note, that the *version* of `spring-retry` is managed by the `spring-boot-starter-parent` **not** the `spring-cloud-dependencies` BOM.
+
+### Ribbon Configurations
+
+With the dependencies added to the classpath, Ribbon needs to be configured. This can be done in a variety of (Spring-like) ways, the simplest of which is to add configurations to `application.yml`. For reference, please have a look at [Address Service Client's `application.yml`](./address.service.client/src/main/resources/application.yml).
+
+The following configurations were added:
+
+```yaml
+ribbon:
+  ConnectTimeout: 1000              # timeout for establishing a connection.
+  ReadTimeout: 1000                 # timeout for receiving data after connection is established.
+  MaxAutoRetries: 1                 # maximum number of retries ribbon will attempt in case of timeouts or errors.
+  MaxAutoRetriesNextServer: 1       # maximum number of other service instances to retry.
+  OkToRetryOnAllOperations: false   # disable retries for POST operations
+  retryableStatusCodes: 404,500     # retry when receiving these response status codes. Requires Spring Retry on the classpath. 
+
+hystrix.command.default.execution.isolation.thread.timeoutInMilliseconds: 4500
+```
+
+These settings configure Ribbon's timeouts and retry behavior.
+`ConnectTimeout` is the timeout used by Ribbon when it tries to establish a connection to a service instance - if the connection setup does not succeed within the timeout, Ribbon will interpret this as an error and will update its connection statistics for the service instance accordingly.  
+
+Likewise, `ReadTimeout` is the timout used for established connections. Should no data arrive within the given timeout, an error will be recorded.
+
+`MaxAutoRetries` specifies the maximum number of retry attempts Ribbon will perform if it encountered an error (e.g. due to the timeouts above).
+You can set this to `0` to stop Ribbon from retrying any requests. But generally, retrying once may be a good approach.
+
+`MaxAutoRetriesNextServer` is the maximum number of other service instances (excluding the first one) Ribbon will try out in case the current service instance does not respond (after a `MaxAutoRetries` attempts). You can set this to `0` if you do not want Ribbon to try other instances, however, this would severely limit the benefits of Ribbon as a load balancer and is not recommended. The default is `1`.  
+Note, that after switching to another service instance, Ribbon will again retry requests `MaxAutoRetries` times on that service instance.  
+Note also, that Ribbon shows a little odd behavior, when only **one** service instance is available in total and the service instance is generally available but throws application-level errors (e.g. an exception). In that case, Ribbon will retry `MaxAutoRetries` times on the instance and then switch to the next available service instance - which is the same. As a result, Ribbon will retry the same sequence again.
+This is a rare and rather unrealistic case, so this is not a problem.
+
+If not configured otherwise, Ribbon will retry all HTTP operations, including `POST` requests. Since this may have consistency implications on your backend, you can disable retrying of `POST` requests using the `OkToRetryOnAllOperations` flag.
+
+Finally, `retryableStatusCodes` specifies the HTTP error codes upon which Ribbon will automatically issue a retry. There are certain defaults Ribbon uses. `500 Internal Server Error` is by default **not** retried. In the sample client we explicitly enabled it for testing, however.
+
+More details about configurations can be found in [CommonClientConfigKey.java](https://github.com/Netflix/ribbon/blob/master/ribbon-core/src/main/java/com/netflix/client/config/CommonClientConfigKey.java) and the [Netflix Ribbon documentation](https://github.com/Netflix/ribbon/wiki/Getting-Started#the-properties-file-sample-clientproperties).
+
+**Note:** in case you did not want to use Eureka to define the server list (e.g. during a test) you can also use a hard-coded list of URLs using the `ribbon.listOfServers` property.
+
+### Adjusting Hystrix Timeouts
+
+The `application.yml` of the previous section has an important configuration: 
+
+```yaml
+hystrix.command.default.execution.isolation.thread.timeoutInMilliseconds: 4500
+```
+
+This configures the timeout Hystrix uses before it will mark the execution of a `HystrixCommand` as a failure. This may lead to fallbacks being executed or opening the circuit to a service entirely.
+
+This timeout needs to be carefully adjusted according to the timeouts and retry behavior of Ribbon (see [Integration with Hystrix](#integration-with-hystrix) for details).
+
+The rule of thumb for a calculation of the Hystrix Timeout can be summarised as follows:
+
+```
+hystrix timeout = max(ribbon.ConnectTimeout, ribbon.ReadTimeout) * (1 + ribbon.MaxAutoRetries) * (1 + MaxAutoRetriesNextServer) + B
+
+where:
+- max(x,y): Function returning the larger number of x and y. 
+- B:        Buffer time between 250ms to 500 ms
+```
+
+This can be explained as follows: 
+In its simplest configuration, Ribbon will not retry requests (`MaxAutoRetries: 0`) and not try other service instances (`MaxAutoRetriesNextServer: 0`). In that case, two scenarios can occur:
+1. The connection setup fails, meaning `ribbon.ConnectTimeout` will apply
+2. Connection setup succeeds, but data does not arrive within the `ribbon.ReadTimeout`.
+In either of both scenarios the time Hystrix should wait, before it marks a command as a failure, is determined by the larger number (to be safe) of the two timeouts.
+
+In the more complex cases, where requests are retried several times and on several service instances, the maximum timeout simply is multiplied several times.
+
+Finally, to add a little bit for safety buffer, we add a buffer time between 250 and 500 ms.
+
+In the example above, Hystrix will wait 4.5 seconds before it marks a command as failure - this gives Ribbon enough time to catch connection- or read-timeout errors and retry the request once on the same instance and then another two times (initial request + retry) on one other instance.
+
+### Maintaining Zone Information
+
+Zone information is maintained as Eureka client metadata. We have seen this used before in [Using Custom Service Metadata](#using-custom-service-metadata).  
+
+The way this is done is very simple. Just add the following metadata to your [`application.yml`](./address.service.client/src/main/resources/application.yml)
+
+```yaml
+eureka:
+  instance:
+    metadata-map:
+      zone: AWS-EU-FRA        # Specify the zone this service is running in. Used to match clients in the same zone first.
+```
+
+Note, that zone information needs to be maintained for **both the service (instances) and the service clients** (usually other services consuming the former). For example, you will find zone information maintained in `address.service`'s [`application.yml`](./address.service/src/main/resources/application.yml) as well as in `address.service.client`'s [`application.yml`](./address.service.client/src/main/resources/application.yml).
+
+## Ribbon in Action
+
+To see Ribbon in action, first you need undestand the background given above. If you haven't read it yet, now's a good time to start.
+
+We have added another REST endpoint to `address.service`'s `RESTEndpoint` class:
+
+```java
+    @RequestMapping(value = "/failing-address", method = RequestMethod.GET)
+    public Address failing() throws Exception {
+        Thread.sleep(1500);
+        System.out.println("Simulating failing ADDRESS-SERVICE");
+        throw new RuntimeException("Simulating failing ADDRESS-SERVICE.");
+    }
+```
+
+When calling this `/failing-address` endpoint an error will always be reported back to the caller.
+
+We have added the [`RetryTestApp`](./address.service.client/src/main/java/com/sap/cloud/address/service/client/retrytest/RetryTestApp.java)-class to `address.service.client` to show Ribbon's retry behavior exemplified on a `@LoadBalanced RestTemplate` - of course this was also tested and works for `FeignClient`s. `RetryTestApp` uses a `RestTemplate`-based client that calls the `/failing-address` endpoint of `address.service`.
+
+To get a test scenario running, you should:
+1. Start a Eureka instance
+1. Start two instances of `address.service`. Note: you will need to modify the port for the second instance in `application.yml` to avoid port clashes.
+1. Run `address.service.client`'s `RetryTestApp`.
+
+What you should see is the following:
+
+1. The console log of `RetryTestApp` should display "`Address from RestTemplate Approach: Fallback called for FailingAddressService!`".  
+   This is the fallback that was ultimately executed by Hystrix. 
+1. In the console logs of **both** address service instances you should see the following output:  
+
+```java
+Simulating failing ADDRESS-SERVICE
+2019-03-13 13:04:29.118 ERROR 12258 --- [nio-8080-exec-4] o.a.c.c.C.[.[.[/].[dispatcherServlet]    : Servlet.service() for servlet [dispatcherServlet] in context with path [] threw exception [Request processing failed; nested exception is java.lang.RuntimeException: Simulating failing ADDRESS-SERVICE.] with root cause
+
+java.lang.RuntimeException: Simulating failing ADDRESS-SERVICE.
+	at com.sap.cloud.address.service.RESTEndpoint.failing(RESTEndpoint.java:35) ~[classes/:na]
+	at sun.reflect.NativeMethodAccessorImpl.invoke0(Native Method) ~[na:1.8.0_202]
+	at sun.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:62) ~[na:1.8.0_202]
+	...
+
+Simulating failing ADDRESS-SERVICE
+2019-03-13 13:04:30.664 ERROR 12258 --- [nio-8080-exec-4] o.a.c.c.C.[.[.[/].[dispatcherServlet]    : Servlet.service() for servlet [dispatcherServlet] in context with path [] threw exception [Request processing failed; nested exception is java.lang.RuntimeException: Simulating failing ADDRESS-SERVICE.] with root cause
+
+java.lang.RuntimeException: Simulating failing ADDRESS-SERVICE.
+	at com.sap.cloud.address.service.RESTEndpoint.failing(RESTEndpoint.java:35) ~[classes/:na]
+	at sun.reflect.NativeMethodAccessorImpl.invoke0(Native Method) ~[na:1.8.0_202]
+	at sun.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:62) ~[na:1.8.0_202]
+	...
+```
+
+Notice and verify that there are **two** exception stack traces in the logs of **both** service instances!  
+This is because Ribbon sent the request to the first `address.service` instance and failed. Then it retried once (just as configured). When that request also failed it selected another instance from the list and did the same again. Only when all these attempts failed, Ribbon reported back an error to Hystrix - which was patiently waiting for Ribbon to do its work. When Hystrix received the terminal error from Ribbon, it executed the fallback you see in the console of `RetryTestApp`.
+
+### Note for Cloud Foundry Deployments
+
+Ribbon is a load balancer, and Cloud Foundry already has one - the Go-Router. While Ribbon can be deployed (as shown above) to Cloud Foundry, its load balancing qualities are negated by the Go-Router.  
+The picture below depicts the situation:
+
+![Ribbon-On-CF-Plain](.documentation/Ribbon-On-CF-Plain.png)
+
+In a plain deployment, Eureka is deployed to CF along with a service (in this case *Address Service*). Several instances of *Address Service* may be started to make it more available.
+
+Ribbon will be used by the *Address Service Consumer* to lookup the list of service instances from Eureka, and Ribbon may even choose one of these instances based on its load balancing rule (round-robin in its simplest form), but this choice will have no effect when the *Address Service Consumer* sends out the request.  
+That is because each of the *Address Service* instances share the exact same URL - which is the **route** of the *Address Service* (e.g. `https://address-service.<your cf domain>`).
+
+When the HTTP client makes a request to that URL, Go-Router will be involved and resolve the URL to the pool of *Address Service* instances. Go-Router's load balancer will then decide which of the instances the request should be fowarded to - and that instance might be a completely different one than the one Ribbon had originally selected.
+
+In such a deployment, Ribbon's load balancing (and `MaxAutoRetriesNextServer`) capability is not needed. 
+It won't do much harm, but may be a little more inefficient. You can therefore turn it off.
+You can do so, by 
+* setting `MaxAutoRetriesNextServer` to `0` - thus making sure that Ribbon does not retry requests on the next instance in the pool (since that might not be the one Go-Router routes to)
+* Providing an `IRule` implementation which always selects the same service instance from the server list returned by Eureka - since they all share the same URL, they are all the same
+
+Note, that even though Ribbon is not used as load balancer anymore, it still can be useful to use it on Cloud Foundry:  
+First, it allows for an easy integration with Eureka - thus allowing you access to service metadata, if you need to do service (not service instance!) selection!  
+Second, it allows you to use Eureka service names in URLs sent by `FeignClient`s or `@Loadbalanced RestTemplate`s - thus effectively giving providing the means to call services by an alias name.  
+This will give you the flexibility to decide at runtime, which service (or service version) the alias name should be resolved to and open the door to implementing canary testing rules based on feature flags, version and other service metadata.
+
+If you are not 100% convinced yet, note that there is a way to deploy Ribbon to Cloud Foundry and take over the load balancing from Go-Router. This is shown in the `master-with-zuul-hystrix-turbine-ribbon-cf` branch and also described [here](https://github.com/TheFonz2017/Spring-Cloud-Netflix-Ribbon-CF-Routing).
+
 # What's Next?
 
-Next, we will look into how 
-* Hystrix Streams can be aggregated by Turbine
+Next, we will look into how ...
+* Ribbon is used in combination with Zuul
 * Zuul can be configured to
-  * support in canary testing
+  * support in canary testing (using Ribbon rules)
   * blue-green deployments
   * zero downtime
   * authenticate client requests
@@ -1607,3 +1946,12 @@ Next, we will look into how
   * [Spring Cloud Turbine Documentation](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_turbine)
   * [Netflix Turbine Documentation](https://github.com/Netflix/Turbine/wiki/Getting-Started-(1.x)) | [Configuration](https://github.com/Netflix/Turbine/wiki/Configuration-(1.x))
   * [Turbine Clusters and AWS](https://github.com/spring-cloud/spring-cloud-netflix/issues/1816)
+* Ribbon
+  * [Retrying Failed Requests with Ribbon (incl. loadbalanced REST Templates)](http://cloud.spring.io/spring-cloud-static/Finchley.SR1/multi/multi_retrying-failed-requests.html)
+  * [Ribbon LoadBalancerCommand Class](https://github.com/Netflix/ribbon/blob/master/ribbon-loadbalancer/src/main/java/com/netflix/loadbalancer/reactive/LoadBalancerCommand.java) - To understand `MaxRetries` and `MaxRetriesNextServer` better
+  * [Spring Cloud Netflix Ribbon Default Configuration](https://cloud.spring.io/spring-cloud-netflix/single/spring-cloud-netflix.html#_customizing_the_ribbon_client) | [Class](https://github.com/spring-cloud/spring-cloud-netflix/blob/master/spring-cloud-netflix-ribbon/src/main/java/org/springframework/cloud/netflix/ribbon/RibbonClientConfiguration.java)
+  * [Netflix Availability Filtering Rule](https://github.com/Netflix/ribbon/wiki/Working-with-load-balancers#availabilityfilteringrule) - the rule using a Ribbon-internal circuit breaking mechanism.
+  * [Netflix Ribbon ZoneAvoidanceRule class](https://github.com/Netflix/ribbon/blob/master/ribbon-loadbalancer/src/main/java/com/netflix/loadbalancer/ZoneAvoidanceRule.java) - containing the logic to track availability of service instances and Ribbon-internal circuit-breaking.
+  * [Good Ribbon Tutorial](https://piotrminkowski.wordpress.com/2017/05/15/part-3-creating-microservices-circuit-breaker-fallback-and-load-balancing-with-spring-cloud/)
+  * [Netflix Ribbon Configurations](https://github.com/Netflix/ribbon/wiki/Getting-Started#the-properties-file-sample-clientproperties) | [Class](https://github.com/Netflix/ribbon/blob/master/ribbon-core/src/main/java/com/netflix/client/config/CommonClientConfigKey.java)
+  * [Canary Testing with Ribbon / Passing Request Information to a Ribbon Rule](https://cloud.spring.io/spring-cloud-netflix/multi/multi_spring-cloud-ribbon.html#how-to-provdie-a-key-to-ribbon)

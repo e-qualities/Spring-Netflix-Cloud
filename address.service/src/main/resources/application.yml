@@ -13,7 +13,8 @@ eureka:
   instance:
     metadata-map:
       version: 1.0.0
-      cluster: DEV            # Required by Turbine (see turbine project's application.yml) 
+      cluster: DEV            # Required by Turbine (see turbine project's application.yml)
+      zone: AWS-EU-FRA        # Specify the zone this service is running in. Used to match clients in the same zone first.
       events: > 
         { 
           [
@@ -59,21 +60,11 @@ eureka:
     securePortEnabled:    true
     securePort:           443
     metadata-map:
+      # Adding information about the application GUID to 
+      # each instance metadata. This could be used by Ribbon
+      applicationGUID: ${vcap.application.application_id}
       # No need to replicate this information in metadata. 
       # It is available from InstanceInfo.
       # instanceId: "${vcap.application.instance_id:-}"
-      events: > 
-        { 
-          [
-            {
-              "type" :     "customerCreated", 
-              "registry" : "https://kafka.registry.com"
-            }, 
-            {
-              "type" :     "customerDeleted", 
-              "registry" : "https://kafka.registry.com"
-            }
-          ]
-        }
     #nonSecurePort:   80
     #preferIpAddress: true    

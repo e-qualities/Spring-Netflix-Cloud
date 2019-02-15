@@ -30,29 +30,36 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-web</artifactId>
 		</dependency>
-		
+
 		<dependency>
-      <groupId>org.springframework.cloud</groupId>
-      <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
-    </dependency>
+			<groupId>org.springframework.cloud</groupId>
+			<artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
+		</dependency>
 
-    <!-- Required for health checks and info pages advertised by the service and read by Eureka -->
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-actuator</artifactId>
-    </dependency>
-    
-    <!-- Required to enable hystrix / circuit breaking -->
-    <dependency>
-      <groupId>org.springframework.cloud</groupId>
-      <artifactId>spring-cloud-starter-netflix-hystrix</artifactId>
-    </dependency>
+		<!-- Required for health checks and info pages advertised by the service 
+			and read by Eureka -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
 
-    <!-- For use of Feign client for HTTP / REST requests. -->
-    <dependency>
-      <groupId>org.springframework.cloud</groupId>
-      <artifactId>spring-cloud-starter-openfeign</artifactId>
-    </dependency>
+		<!-- Required to enable hystrix / circuit breaking -->
+		<dependency>
+			<groupId>org.springframework.cloud</groupId>
+			<artifactId>spring-cloud-starter-netflix-hystrix</artifactId>
+		</dependency>
+
+		<!-- For use of Feign client for HTTP / REST requests. -->
+		<dependency>
+			<groupId>org.springframework.cloud</groupId>
+			<artifactId>spring-cloud-starter-openfeign</artifactId>
+		</dependency>
+
+		<!-- Required for Ribbon-Loadbalanced REST Templates to do retries. -->
+		<dependency>
+			<groupId>org.springframework.retry</groupId>
+			<artifactId>spring-retry</artifactId>
+		</dependency>
 
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
@@ -73,12 +80,33 @@
 			</dependency>
 		</dependencies>
 	</dependencyManagement>
+	
+	<profiles>
+	 <profile>
+	   <id>ribbon-standard</id>
+	   <activation>
+	     <activeByDefault>true</activeByDefault>
+	   </activation>
+	   <properties>
+	     <spring.boot.mainClass>com.sap.cloud.address.service.client.ClientApp</spring.boot.mainClass>
+	   </properties>
+	 </profile>
+	 <profile>
+	   <id>ribbon-retry-test</id>
+	   <properties>
+       <spring.boot.mainClass>com.sap.cloud.address.service.client.retrytest.RetryTest</spring.boot.mainClass>
+     </properties>
+	 </profile>
+	</profiles>
 
 	<build>
 		<plugins>
 			<plugin>
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
+				<configuration>
+					<mainClass>${spring.boot.mainClass}</mainClass>
+				</configuration>
 			</plugin>
 		</plugins>
 	</build>

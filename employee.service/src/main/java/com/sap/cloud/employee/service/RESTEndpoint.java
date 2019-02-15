@@ -17,7 +17,7 @@ public class RESTEndpoint {
 
         // simulates random errors
         if(Math.random() > .5) {
-            Thread.sleep(3 * 1000);
+            Thread.sleep(1500);
             logger.info("Simulating random EMPLOYEE-SERVICE downtime.");
             throw new RuntimeException("Simulating random EMPLOYEE-SERVICE downtime.");
         }

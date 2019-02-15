@@ -7,6 +7,9 @@ server:
   port: ${PORT:7777}
   
 eureka:
+  instance:
+    metadata-map:
+      zone: AWS-EU-FRA      # Specify the zone this service is running in. Used to match clients in the same zone first.
   client: 
     serviceUrl:
       defaultZone: http://localhost:8761/eureka

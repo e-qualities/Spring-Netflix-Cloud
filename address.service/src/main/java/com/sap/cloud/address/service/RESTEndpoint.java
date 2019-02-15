@@ -17,7 +17,7 @@ public class RESTEndpoint {
         
         // simulate random errors
         if(Math.random() > .5) {
-            Thread.sleep(3 * 1000);
+            Thread.sleep(1500);
             logger.info("Simulating random ADDRESS-SERVICE downtime.");
             throw new RuntimeException("Simulating random ADDRESS-SERVICE downtime.");
         }
@@ -30,5 +30,12 @@ public class RESTEndpoint {
         address.setStreetName("Franz-Liszt-Strasse");
 
         return address;
+    }
+    
+    @RequestMapping(value = "/failing-address", method = RequestMethod.GET)
+    public Address failing() throws Exception {
+        Thread.sleep(1500);
+        logger.info("Simulating failing ADDRESS-SERVICE");
+        throw new RuntimeException("Simulating failing ADDRESS-SERVICE.");
     }
 }

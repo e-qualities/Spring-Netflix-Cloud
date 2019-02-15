@@ -59,9 +59,9 @@ public class ClientApp {
     public ETAddressServiceClient etAddressServiceClient() {
         return new ETAddressServiceClient();
     }
-    
-    @Bean
+
     @LoadBalanced //Note this annotation! It makes sure that RestTemplate uses Ribbon under the hood and thus inherits Eureka integration.
+    @Bean
     public RestTemplate restTemplate() {
         return new RestTemplate();
     }

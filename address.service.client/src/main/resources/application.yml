@@ -14,6 +14,7 @@ eureka:
     metadata-map:
       version: 1.0.0
       cluster: DEV            # Required by Turbine (see turbine project's application.yml)
+      zone: AWS-EU-FRA        # Specify the zone this service is running in. Used to match clients in the same zone first.
     healthcheck: 
       enabled: true
 
@@ -35,11 +36,20 @@ feign.hystrix.enabled: true
 # retry requests (if Spring Retry is on the classpath). These retries
 # should also be included into the Hystrix timeout. Only if Ribbon (and
 # all its retry attempts) have timed out, Hystrix should get active.
-hystrix.command.default.execution.isolation.thread.timeoutInMilliseconds: 3500
-ribbon.ConnectTimeout: 1000 # timeout for establishing a connection.
-ribbon.ReadTimeout: 3000    # timeout for receiving data after connection is established.
-
-
+# Rule of thumb: 
+# hystrix timout = (max(ribbon.ConnectTimeout, ribbon.ReadTimeout) * (1 + ribbon.MaxAutoRetries) * (1 + MaxAutoRetriesNextServer)) + Buffer
+# with Buffer = 250ms to 500 ms
+hystrix.command.default.execution.isolation.thread.timeoutInMilliseconds: 4500
+ribbon:
+  ConnectTimeout: 1000              # timeout for establishing a connection.
+  ReadTimeout: 1000                 # timeout for receiving data after connection is established.
+  MaxAutoRetries: 1                 # maximum number of retries ribbon will attempt in case of timeouts or errors.
+  MaxAutoRetriesNextServer: 1       # maximum number of other service instances to retry.
+  OkToRetryOnAllOperations: false    # disable retries for POST operations
+  retryableStatusCodes: 404,500     # retry when receiving these response status codes. Requires Spring Retry on the classpath. 
+  #eureka.enabled: false            # for testing, if you need to disable Eureka server lists for Ribbon.
+  #ServerListRefreshInterval: 15000 
+  # See also: https://github.com/Netflix/ribbon/blob/master/ribbon-core/src/main/java/com/netflix/client/config/CommonClientConfigKey.java
 ---
 spring.profiles: cloud
 
@@ -59,7 +69,12 @@ eureka:
     securePort:           443
     #nonSecurePort:       80
     #preferIpAddress:     true
-    #metadataMap:
-    #  instanceId: ${vcap.application.instance_id:-}
+    metadataMap:
+      # Adding information about the application GUID to 
+      # each instance metadata. This could be used by Ribbon
+      applicationGUID: ${vcap.application.application_id}
+      # No need to replicate this information in metadata. 
+      # It is available from InstanceInfo.
+      # instanceId: "${vcap.application.instance_id:-}"
 
 
