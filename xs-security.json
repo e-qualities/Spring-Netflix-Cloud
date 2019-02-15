@@ -1,0 +1,32 @@
+{
+  "xsappname"     : "spring-netflix-demo",
+  "description"   : "A sample application using Spring Netflix Zuul as an API gateway.",
+  "tenant-mode"   : "shared",
+  "scopes"        : [
+    {
+      "name"        : "$XSAPPNAME.Read",
+      "description" : "Read Permissions."
+    },
+    {
+      "name"        : "$XSAPPNAME.Write",
+      "description" : "Write permissions."
+    }
+  ],
+  "role-templates": [
+    {
+      "name"             : "Viewer",
+      "description"      : "View Data",
+      "scope-references" : [
+        "$XSAPPNAME.Read"
+      ]
+    },
+    {
+      "name"                 : "Modifier",
+      "description"          : "Modify Data",
+      "scope-references"     : [
+        "$XSAPPNAME.Read",
+        "$XSAPPNAME.Write"
+      ]
+    }
+  ]
+}

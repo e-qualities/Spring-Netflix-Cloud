@@ -5,9 +5,44 @@ spring:
 
 server:
   port: ${PORT:8888}
+  servlet.session.cookie.name: ZUULSESSION 
+  
+# Local Setup: with an OAuth 2.0 server running locally.
+security:
+  oauth2:
+    client:
+       clientId: client-1
+       clientSecret: client-1-secret
+       accessTokenUri: http://localhost:10080/oauth/token
+       userAuthorizationUri: http://localhost:10080/oauth/authorize
+    resource:
+      jwk:
+        key-set-uri: http://localhost:10080/.well-known/jwks.json
+      # Also possible: hard code the public key of the server used for JWT signature validation.
+      # jwt:
+      #   key-value: "-----BEGIN PUBLIC KEY-----MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAwThn6OO9kj0bchkOGkqYBnV1dQ3zU/xtj7Kj7nDd8nyRMcEWCtVzrzjzhiisRhlrzlRIEY82wRAZNGKMnw7cvCwNixcfcDJnjzgr2pJ+5/yDZUc0IXXyIWPZD+XdL+0EogC3d4+fqyvg/BF/F0t2hKHWr/UTXE6zrGhBKaL0d8rKfYd6olGWigFd+3+24CKI14zWVxUBtC+P9Fhngc9DRzkXqhxOK/EKn0HzSgotf5duq6Tmk9DCNM4sLW4+ERc6xzrgbeEexakabvax/Az9WZ4qhwgw+fwIhKIC7WLwCEJaRsW4m7NKkv+eJR2LKYesuQ9SVAJ3EXV86RwdnH4uAv7lQHsKURPVAQBlranSqyQu0EXs2N9OlWTxe+FyNkIvyZvoLrZl/CdlYc8AKxRm5rn2/88nkrYQ0XZSrnICM5FRWgVF2hn5KfZGwtBN85/D4Yck6B3ocMfyX7e4URUm9lRPQFUJGTXaZnEIge0R159HUwhTN1HvyXrs6uT1ZZmW+c3p47dw1+LmUf/hIf8zd+uvHQjIeHEJqxjqfyA8yqAFKRHKVFrwnwdMHIsRap2EKBhHMfeVf0P2th5C9MggYoGCvdIaIUgMBX3TtCdvGrcWML7hnyS2zkrlA8SoKJnRcRF2KxWKs355FhpHpzqyZflO5l98+O8wOsFjGpL9d0ECAwEAAQ==-----END PUBLIC KEY-----"
+      #   key-uri: https://d056076-sub1.authentication.eu10.hana.ondemand.com/token_keys
+     
+# Remote Setup: with an OAuth 2.0 server on SAP CP CF:
+#security:
+#  oauth2:
+#    client:
+#      clientId: <your client ID as seen in VCAP_SERVICES>                                                               
+#      clientSecret: <your client secret as seen in VCAP_SERVICES>                                                        
+#      accessTokenUri: https://<your subaccount domain>.authentication.eu10.hana.ondemand.com/oauth/token            
+#      userAuthorizationUri: https://<your subaccount domain>.authentication.eu10.hana.ondemand.com/oauth/authorize
+#    resource:
+#      jwk:
+#        key-set-uri: https://<your subaccount domain>.authentication.eu10.hana.ondemand.com/token_keys
 
+# Setting security log levels for debugging
+logging.level:
+  org.springframework.security: DEBUG 
+
+# eureka configurations
 eureka:
   instance:
+    leaseRenewalIntervalInSeconds: 2  # only for local development. remove this setting in production and thus default to 30 seconds.
     metadata-map:
       zone: AWS-EU-FRA    # Specify the zone this service is running in. Used to match clients in the same zone first.
       cluster: DEV        # For Turbine clustering.
@@ -24,6 +59,7 @@ info:
 management.endpoints.web.exposure.include: "*"
 management.endpoint.health.show-details: always 
 
+# Hystrix and Ribbon configurations
 hystrix.command.default.execution.isolation.thread.timeoutInMilliseconds: 6500
 ribbon:
   ConnectTimeout: 1000              # timeout for establishing a connection.
@@ -33,8 +69,10 @@ ribbon:
   OkToRetryOnAllOperations: false   # disable retries for POST operations
   retryableStatusCodes: 404,500     # retry when receiving these response status codes. Requires Spring Retry on the classpath.
 
+# Zuul configurations
 zuul:
-  ignoredPatterns: /actuator/**     # don't try forwarding requests that are pointed at /actuator/**, since this is Zuuls own actuator endpoint.
+  sensitiveHeaders: Cookie,Set-Cookie # Blacklist only Cookie and Set-Cookie header, so that Zuul does not forward them to the client and vice versa. The default is Cookie,Set-Cookie,Authorization, but we need the Authorization Header, as JWT Tokens need to be forwarded to downstream services. See also: https://cloud.spring.io/spring-cloud-netflix/multi/multi__router_and_filter_zuul.html#_cookies_and_sensitive_headers
+  ignoredPatterns: /actuator/**       # don't try forwarding requests that are pointed at /actuator/**, since this is Zuuls own actuator endpoint.
   
   groovyFiltersPath:                # This is not an official Zuul configuration. It is added by GroovyFilterPathConfig and used by GroovyFiltersInitializer.
     - groovy/pre                    # See: https://stackoverflow.com/questions/49289584/spring-cloud-zuul-and-groovy-filters
@@ -42,13 +80,13 @@ zuul:
     - groovy/post                   # Use this with extreme care, as with Groovy you could bring down the server, too.
     - groovy/error                  
 
-#  decodeUrl: false                       # see: https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_request_uri_encoding
-#  ribbonIsolationStrategy: THREAD        # set the Hystrix isolation strategy 'THREAD' for all routes (see https://cloud.spring.io/spring-cloud-netflix/multi/multi_spring-cloud-ribbon.html#how-to-configure-hystrix-thread-pools)  
-#  ignoreSecurityHeaders: false           # - use in combination with Spring Security if you want security headers set by BE services.
-#  sensitiveHeaders:                      # - will allow ALL headers to be forwarded by Zuul. Use this with care!                                   
-#  ignoredServices: '*'                   # - will not forward any requests.
-#  <SimpleClassName>                      # See: https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_disable_zuul_filters
-#    <filterType>.disable: true           # List of filters: https://github.com/spring-cloud/spring-cloud-netflix/tree/master/spring-cloud-netflix-zuul/src/main/java/org/springframework/cloud/netflix/zuul/filters
+#  decodeUrl: false                # see: https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_request_uri_encoding
+#  ribbonIsolationStrategy: THREAD # set the Hystrix isolation strategy 'THREAD' for all routes (see https://cloud.spring.io/spring-cloud-netflix/multi/multi_spring-cloud-ribbon.html#how-to-configure-hystrix-thread-pools)  
+#  ignoreSecurityHeaders: false    # - use in combination with Spring Security if you want security headers set by BE services.
+#  sensitiveHeaders:               # - will allow ALL headers to be forwarded by Zuul. Use this with care!                                   
+#  ignoredServices: '*'            # - will not forward any requests.
+#  <SimpleClassName>               # See: https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_disable_zuul_filters
+#    <filterType>.disable: true    # List of filters: https://github.com/spring-cloud/spring-cloud-netflix/tree/master/spring-cloud-netflix-zuul/src/main/java/org/springframework/cloud/netflix/zuul/filters
 #
 #  routes:
 #    address-service:              # name of the service as found in Eureka registry
@@ -85,6 +123,7 @@ zuul:
 #    legacy:
 #      path: /**
 #      url: http://legacy.example.com
+
 ---
 spring.profiles: cloud
 

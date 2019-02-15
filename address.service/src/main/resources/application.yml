@@ -2,6 +2,33 @@
 spring:
   application:
     name: address-service
+  # Local Setup: configurations of the OAuth2 authorization server endpoints.
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: http://localhost:10080                          # uses auto-configuration based on /.well-known/openid-configuration endpoint.
+          # jwk-set-uri: http://localhost:10080/.well-known/jwks.json # uses explicit configuration of jwk-set-uri.
+        
+#  # Remote setup: configurations of an OAuth2 server in SAP CP CF.      
+#  security:
+#    oauth2:
+#      resourceserver:
+#        jwt:
+#         jwk-set-uri: https://<your subaccount subdomain>.authentication.eu10.hana.ondemand.com/token_keys        
+#         # For auto-configuration: If XSUAA offered a proper OpenID Configuration with an issuer that 
+#         # does not point to localhost (http://d056076-sub1.localhost:8080/uaa/oauth/token) then the 
+#         # configs below would completely suffice, and the the resource server would configure itself.
+#         # jwt:
+#         #   issuer-uri: https://<your subaccount subdomain>.authentication.eu10.hana.ondemand.com/
+
+# expose all actuator endpoints. DON'T do this in production.          
+management.endpoints.web.exposure.include: "*"
+management.endpoint.health.show-details: always           
+          
+logging.level:
+  org.springframework.security: DEBUG
+  org.springframework.web: DEBUG
 
 server:
   port: ${PORT:8080}
@@ -11,6 +38,7 @@ eureka:
     serviceUrl:
       defaultZone: http://localhost:8761/eureka
   instance:
+    leaseRenewalIntervalInSeconds: 2  # only for local development. remove this setting in production and thus default to 30 seconds.
     metadata-map:
       #canary: true           # Enable this service for canary testing. If this property is not present the service is deemed to be a production service.
       version: 1.0.0

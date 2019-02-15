@@ -8,6 +8,7 @@ server:
  
 eureka:
   instance:
+    leaseRenewalIntervalInSeconds: 2  # only for local development. remove this setting in production and thus default to 30 seconds.
     hostname: ${vcap.application.uris[0]:localhost}
   client:
     registerWithEureka: false

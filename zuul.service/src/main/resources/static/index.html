@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Zuul</title>
+<base href="/" />
+<link rel="stylesheet" type="text/css" href="/webjars/bootstrap/css/bootstrap.min.css" />
+<script type="text/javascript" src="/webjars/jquery/jquery.min.js"></script>
+<script type="text/javascript" src="/webjars/bootstrap/js/bootstrap.min.js"></script>
+</head>
+<body>
+    <div class="container">
+      <h1>Welcome to Zuul!</h1>
+      <p>
+      Zuul is an API gateway and integrates with an OAuth 2.0 Authorization server that it fetches JWT tokens from using
+      the Authorization Code Grant flow. <br/>
+      It validates the token signature once it has received it and then proxies the token on to downstream services.<br/>
+      Zuul also keeps a session linked to the token, so a client that has authenticated in a browser once, can subsequently
+      access downstream services without having to re-authenticate. This is referred to as OAuth2 SSO.
+      </p>
+      <p>
+      The page you are seeing is the index.html page located in <b>src/main/resources/static</b>. <br/>
+      Below we added a button to logout users (once they have authenticated). Basically, this will invalidate the session with Zuul and remove the
+      OAuth 2.0 token on Zuul side associated with the session.<br/>
+      
+      This is described in this <a href="https://spring.io/guides/tutorials/spring-boot-oauth2/#_social_login_logout">excellent tutorial</a>.
+      </p>
+      
+      <p> 
+      You can trigger the authentication process explicitly by clicking the <b>Authenticate</b> button below. However, authentication 
+      (if no Zuul session exists yet) will also be triggered automatically when accessing a service e.g. <a href="/address-service/v1/address">address-service</a>.<br/>
+      If you already are authenticated, you will <b>not</b> see the <b>Authenticate</b> button but rather see the OAuth 2.0 client as which you have authenticated.
+      </p>
+      
+      <p>
+      <b>Note:</b> The logout button will only log you out of Zuul! It will not log you out of the OAuth2.0 authorization server.<br/> 
+      Thus, if the Authorization server sets a session cookie, in your browser, you will be able to re-authenticate with Zuul (and retrieve a new token) without having to provide your credentials again.<br/>
+      You can witness this behaviour with SAP XSUAA, for example. 
+      </p>
+    
+      <h3>Login Status</h3>
+      <div class="container unauthenticated">
+          You are not currently authenticated with Zuul. <a href="/login">Authenticate</a> <br/>
+      </div>
+      <div class="container authenticated" style="display: none">
+          You are authenticated as: <span id="user"></span>
+          <div>
+              <button onClick="logout()" class="btn btn-primary">Logout</button>
+          </div>
+      </div>
+    </div>
+    <script type="text/javascript" src="/webjars/js-cookie/js.cookie.js"></script>
+    <script type="text/javascript">
+          $.ajaxSetup({
+                beforeSend : function(xhr, settings) {
+                  if (settings.type == 'POST' || settings.type == 'PUT'
+                      || settings.type == 'DELETE') {
+                    if (!(/^http:.*/.test(settings.url) || /^https:.*/
+                        .test(settings.url))) {
+                      // Only send the token to relative URLs i.e. locally.
+                      xhr.setRequestHeader("X-XSRF-TOKEN",
+                          Cookies.get('XSRF-TOKEN'));
+                    }
+                  }
+                }
+              });
+          $.get("/user", function(data) {
+            $("#user").html(data);
+            $(".unauthenticated").hide();
+            $(".authenticated").show();
+          });
+          var logout = function() {
+            $.post("/logout", function() {
+              $("#user").html('');
+              $(".unauthenticated").show();
+              $(".authenticated").hide();
+            })
+            return true;
+          }
+        </script>
+</body>
+</html>

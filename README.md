@@ -111,6 +111,27 @@ Table of Contents
             * [Ribbon Canary Testing Rule](#ribbon-canary-testing-rule)
          * [Trying It Out](#trying-it-out-1)
       * [Summary](#summary-1)
+   * [Integrating Zuul with OAuth 2.0 and Spring Cloud Security](#integrating-zuul-with-oauth-20-and-spring-cloud-security)
+      * [Pre-Requisite: The Authorization Server](#pre-requisite-the-authorization-server)
+         * [Running the Authorization Server](#running-the-authorization-server)
+         * [Authorization Server Configurations](#authorization-server-configurations)
+      * [Running Zuul against the local Authorization Server](#running-zuul-against-the-local-authorization-server)
+         * [What has just happened?](#what-has-just-happened)
+      * [Enabling OAuth 2.0 SSO Support in Zuul](#enabling-oauth-20-sso-support-in-zuul)
+         * [Adding Maven Dependencies](#adding-maven-dependencies)
+         * [Adding ZuulWebSecurityConfiguration Class](#adding-zuulwebsecurityconfiguration-class)
+         * [Adding Zuul Configurations](#adding-zuul-configurations)
+            * [The OAuth 2.0 Configurations](#the-oauth-20-configurations)
+            * [The Zuul Session Cookie Name](#the-zuul-session-cookie-name)
+            * [Adjusting Zuul's Sensitive Headers Setting](#adjusting-zuuls-sensitive-headers-setting)
+         * [Adding ZuulAuthorizationHeaderProxyFilter](#adding-zuulauthorizationheaderproxyfilter)
+         * [Debug Utilities](#debug-utilities)
+      * [Protecting Access to address.service](#protecting-access-to-addressservice)
+         * [Adding Maven Dependencies](#adding-maven-dependencies-1)
+         * [Adding OAuth 2.0 Configurations](#adding-oauth-20-configurations)
+         * [Adding WebSecurityConfigurations Class](#adding-websecurityconfigurations-class)
+         * [Spring Global Method Security](#spring-global-method-security)
+      * [Further Reading](#further-reading)
    * [What's Next?](#whats-next)
    * [References](#references)
 
@@ -2673,13 +2694,506 @@ This shows all the necessary concepts required for realizing things like:
 1. Throttled migration of service clients
 1. Metadata-based routing  
 
+# Integrating Zuul with OAuth 2.0 and Spring Cloud Security
+
+In this section, we will integrate Zuul with an OAuth 2.0 Authorization Server.  
+
+This will make it enable Zuul to...
+* authenticate users - providing a single entrance door to your Cloud solution at the edge of your Cloud application landscape
+* authorize users and other applications or services - enabling access to protected resources. 
+
+This is an essential feature of any API gateway and - as you might have guessed - is supported by Spring Cloud Netflix pretty much out-of-the-box.
+
+## Pre-Requisite: The Authorization Server
+
+In order to show Zuul's integration with an OAuth 2.0 Authorization server, you need an OAuth 2.0 Authorization server.  
+You may use your own, if you have one at hand. In case you don't you will find one in the folder `oauth-authorization-server` in [this github repository](https://github.wdf.sap.corp/Apollo-Evaluation/SpringBoot-Security-OAuth).
+
+For the following descriptions, we will use the `oauth-authorization-server`, as it's an easy way to bring up a local OAuth 2.0 Authorization server withing seconds.
+
+### Running the Authorization Server
+
+To run a local OAuth 2.0 Authorization Server proceed as follows:
+1. Clone the [repository where we provide the OAuth server](https://github.wdf.sap.corp/Apollo-Evaluation/SpringBoot-Security-OAuth)
+1. Open a terminal and in the clone directory, browse to the `oauth-authorization-server` folder. 
+1. Execute `mvn clean package`
+1. Execute `java -jar target/oauth-authorization-server-0.0.1-SNAPSHOT.jar`
+
+This will start the OAuth 2.0 Authorization Server on `http://localhost:10080`, with meaningful defaults.
+
+### Authorization Server Configurations
+
+The `oauth-authorization-server` has two classes which you might want to touch (for more details see the `README.md` in its GitHub repository):
+1. `com.acme.oauth.authorizationserver.AuthorizationServerConfigurations` - here the OAuth 2.0 client credentials, the flow types and the redirect URLs are maintained (hard coded right now). See method [`configureInMemoryOAuthClients(...).`](https://github.wdf.sap.corp/Apollo-Evaluation/SpringBoot-Security-OAuth/blob/master/oauth-authorization-server/src/main/java/com/acme/oauth/authorizationserver/AuthorizationServerConfigurations.java#L212).
+1. `com.acme.oauth.authorizationserver.WebSecurityConfigurations` - here the user login credentials are maintained. See method [`userDetailsService(...)`](https://github.wdf.sap.corp/Apollo-Evaluation/SpringBoot-Security-OAuth/blob/master/oauth-authorization-server/src/main/java/com/acme/oauth/authorizationserver/WebSecurityConfigurations.java#L60).
+
+Thus, if you do not like the defaults we are using in this section, feel free to consult the files above and make changes if necessary.
+
+## Running Zuul against the local Authorization Server
+
+:exclamation: **Important:** Make sure you are on the [OAuth branch](https://github.com/e-qualities/Spring-Netflix-Cloud/tree/master-with-zuul-hystrix-turbine-ribbon-cf-canarytesting-oauth2) of this repository before trying the following out.
+
+We have configured Zuul to connect to the local OAuth 2.0 Authorization Server. So all you need to do is start Zuul:
+
+1. Make sure the Authorization Server is running
+1. Build and start `eureka.service`
+1. Build and start `address.service`
+1. Build and start `zuul.service`
+1. Open a browser tab (preferably a private one) and point it to `http://localhost:8888/`. This will open Zuul's home page, where a few of the concepts are explained in more detail.
+
+You might want to wait for a few seconds before continuing, just to be sure that all services have registered to Eureka.
+
+To see the Authentication and Authorization in action, proceed as follows:
+
+1. Find the `address-service` link on the Zuul home page and click on it.
+1. You will see a popup opening asking you for user credentials. Enter `TestUser` and `test1234` as password and hit enter.
+1. Next you should see an address returned from `address.service` and the URL of `http://localhost:8888/address-service/v1/address` that the link forwarded you to.
+
+### What has just happened?
+
+* When you clicked the link to `address-service`, the browser tried to open the URL `http://localhost:8888/address-service/v1/address`. That tries to access `address.service`'s endpoint via Zuul.
+* Zuul tried to route to the endpoint of `address.service` and noticed that you (the user) have not yet authenticated and that it does not have an OAuth 2.0 token to forward to `address.service` yet.
+* Zuul therefore redirects you to its own `/login` endpoint, which in turn, redirects you to the Authorization Server's `/login` endpoint. So the popup querying for your user credentials is presented by the Authorization Server, not by Zuul.
+* After you entered your credentials, the Authorization Server successfully authenticated you, and created an OAuth 2.0 `access token` as well as an `access code`.
+* The Authorization Server then redirected you back to the `/login` endpoint of Zuul, encoding the `access code` in the URL.
+* Zuul extracted the `access code` and with it fetched the OAuth 2.0 `access token` from the Authorization Server. That happens without browser redirection and behind the scenes.
+* Zuul assigns the OAuth 2.0 `access token` to the session it keeps for your browser, i.e. it maintains a mapping of the session to the token. Currently this happens in memory, but can be made persistent using Spring Cloud Sessions.
+* Having a valid token, Zuul now has two things:
+  1. a proof that you have properly authenticated
+  1. an authorization token it can forward to downstream services.
+* Next, Zuul redirects you to the original `http://localhost:8888/address-service/v1/address`, passing the OAuth 2.0 `access token` in the `Authorization: Bearer <token>` header.
+* `address.service` received the request proxied by Zuul and checked if it contained a valid `access token`. If not, `address.service` would fail.
+* With a valid token being in the request, `address.service` produced the expected answer and delivered an address in the response.
+
+The flow described above is the **OAuth 2.0 Authorization Code Grant Flow**, which is used to turn a user authentication into an authorization token that can be used both as a proof of authentication as well as a means check authorized access to protected resources. This is also sometimes referred to as *OAuth 2.0 Single Sign On (SSO)*.  
+The `access token` in our example is a [JWT](https://jwt.io/introduction/) token - but that's only one format to express an access token in.
+
+## Enabling OAuth 2.0 SSO Support in Zuul
+
+In the following, we explain what changes were necessary for Zuul to support OAuth 2.0 as described above.
+
+### Adding Maven Dependencies
+
+The following Maven dependencies need to be added to Zuul's `pom.xml`:
+
+```xml
+<dependency>
+  <groupId>org.springframework.cloud</groupId>
+  <artifactId>spring-cloud-starter-oauth2</artifactId>
+</dependency>
+
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-security</artifactId>
+</dependency>
+```
+
+This mainly includes Spring's and Spring Boot's security-related libraries. Especially Spring Cloud's `spring-cloud-starter-oauth2` is important, as it provides the `@EnableOAuth2Sso` that does most of the magic.
+
+### Adding `ZuulWebSecurityConfiguration` Class
+
+With the Maven dependencies added, we need to create a `WebSecurityConfiguration` and annotate it with the `@EnableOAuth2Sso` annotation.  
+
+❗️**Important:** It is imperative, that the @EnableOAuth2Sso annotation be placed on a `WebSecurityConfigurerAdapter` sub class. Annotating your `@SpringBootApplication` with it will **not** work (unless it is also a `WebSecurityConfigurerAdapter` sub class)!
+
+```java
+@EnableOAuth2Sso   
+@EnableWebSecurity(debug = true) // set this to false in production!
+public class ZuulWebSecurityConfiguration extends WebSecurityConfigurerAdapter {
+
+    /**
+     * The security configurations.
+     */
+    @Override
+    protected void configure(HttpSecurity http) throws Exception {
+        http
+          .antMatcher("/**")
+            .authorizeRequests()
+              .antMatchers("/", "/login**","/callback/", "/webjars/**", "/error**")
+              .permitAll()
+          .anyRequest()
+            .authenticated()
+          .and()
+            .logout()                // Expose a POST (only) endpoint /logout for ending the SSO session in Zuul and invalidate the cookie.
+              .logoutSuccessUrl("/") // After successful logout, redirect to / 
+            .permitAll()             // Make sure /logout is accessible without authentication.
+          .and()
+            .csrf()                  // Configure cross site request forgery check handling
+                                     // make sure Zuul sends an X-CSRF token header we can use in POSTs.  
+              .csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse()); 
+    }
+}
+```
+The configuration above is a typical Spring Web Security configuration, and if you are familiar with Spring Security, you will not spot anything OAuth 2.0-specific in here.
+The `@EnableOAuth2Sso` annotation triggers Spring Boot auto-configuration magic in the background and adds the required beans and configuration sources to integrate Zuul with a standard OAuth 2.0 Authorization Server.  
+It is this annotation that "plugs in" OAuth 2.0 as an authentication framework into Spring Security.
+
+The configuration requires all requests to all paths (`/**`) to be authenticated and authorized except for access to the home page (`/`), the `/login` endpoint, the error page `/error**`, any callback endpoints (`/callback/`) and the endpoint where the WebJars
+Java Script resources are served (`/webjars/**`). See [Spring Web MVC](https://docs.spring.io/spring/docs/3.2.x/spring-framework-reference/html/mvc.html), [Spring Cloud Security](https://cloud.spring.io/spring-cloud-static/spring-cloud-security/2.1.0.RELEASE/single/spring-cloud-security.html) and [WebJars](https://www.webjars.org/documentation#springboot) for details.
+
+Additionally, we support a Zuul "single logout" by providing a `POST`-based `/logout` endpoint and a redirect to the home page if the logout succeeded. Access to the `/logout` endpoint is unprotected.  
+`POST`ing a request to the `/logout` endpoint requires a valid session cookie. It will result in Zuul invalidating the session and throwing away the OAuth 2.0 access token.
+
+`POST`ing to `/logout` will **not** result in the invalidation of the session your browser has with the OAuth 2.0 Authorization Server!  
+In other words, you can use the `/logout` endpoint to throw away the token and force Zuul to fetch a new one. However, you won't have to re-authenticate to the OAuth 2.0 Authorization server, when Zuul fetches the token again - unless, of course, the session with the OAuth 2.0 Authorization Server has expired.
+
+Finally, the configuration re-configures the Cross-Site Request Forgery handling of Spring Security to return the CSRF token in the `X-CSRF` header. This makes it easier to send `POST` requests, e.g. using Postman, that pass the CSRF checks.  
+See the `Postman-Requests` folder for a collection of Zuul requests. 
+
+**Note:** Technically, Zuul acts as an OAuth 2.0 Client - it fetches a token with OAuth 2.0 client credentials. However, in a way Zuul also acts as a resource server, since it checks the validity and signature of the token as well.
+
+### Adding Zuul Configurations
+
+`@EnableOAuth2Sso` wired the OAuth 2.0 flows under the hood of Spring Security. Next, we need to tell Spring Security OAuth 2.0 where to find our OAuth 2.0 Authorization Server and how to communicate with it.
+We do so in Zuul's `application.yml`:
+
+```yaml
+...
+
+server:
+  servlet.session.cookie.name: ZUULSESSION 
+  
+# Enable OAuth 2 Security.
+security:
+  oauth2:
+    client:
+       # Local setup:
+       clientId: client-1
+       clientSecret: client-1-secret
+       accessTokenUri: http://localhost:10080/oauth/token
+       userAuthorizationUri: http://localhost:10080/oauth/authorize
+    resource:
+      jwk:
+        key-set-uri: http://localhost:10080/.well-known/jwks.json
+
+# Zuul configurations
+zuul:
+  sensitiveHeaders: Cookie,Set-Cookie # Blacklist only Cookie and Set-Cookie header, so that Zuul does not forward them to the client and vice versa. 
+                                      # The default is Cookie,Set-Cookie,Authorization - but we need the Authorization Header, as JWT Tokens need to be forwarded to downstream services!
+                                      # See also: https://cloud.spring.io/spring-cloud-netflix/multi/multi__router_and_filter_zuul.html#_cookies_and_sensitive_headers
+```
+
+#### The OAuth 2.0 Configurations
+
+The main OAuth-specific configurations are maintained under the `security.oauth2` node.
+
+`security.oauth2.client` contains the configurations for the `clientId` and `clientSecret` that Zuul uses to identify itself to the OAuth 2.0 Auhtorization server. In a way, they are technical user credentials.
+The values of `clientId` and `clientSecret` are maintained in the OAuth 2.0 Authorization Server (see [Authorization Server Configurations](#authorization-server-configurations)) and are normally not hardcoded here but injected into Zuul's environment.  
+(If that is the case you can reference them using `${client-id-from-environment}`-syntax in `application.yml`!)
+
+The `accessTokenUri` and `userAuthorizationUri` need to point to the (standard) endpoints of the OAuth 2.0 Auhtorization Server where Zuul can get the token from and redirect the user agent (browser) to, to allow users to explicitly grant permissions to resources. The latter is not visible in our case, since the OAuth 2.0 Authorization Server is configured to auto-approve all requested scopes of the client.
+
+The `security.oauth2.resource.jwk.key-set-uri` needs to point to the JWT Key Set endpoint of the authorization server. At this endpoint OAuth 2.0 Authorization Server advertises its public keys. These are required to check the signature of the JWT token, once it is received. This URI is used by Zuul (or more generically an OAuth client) to lookup the public key(s) of the server and use them to validate the JWT signature.  
+Which key needs to be used for validation is denoted in the header of the JWT token. The header's `kid` property holds the key's identifier. Here is typical JWT:
+
+```json
+{
+  "alg": "RS256",
+  "typ": "JWT",
+  "kid": "key-id-0"
+}
+{
+  "sub": "TestUser",
+  "exp": 1557338529,
+  "authorities": [
+    "ROLE_USER"
+  ],
+  "jti": "1d767ad2-f90c-4a34-85b5-694748da3b79",
+  "client_id": "client-1",
+  "scope": [
+    "read_resource",
+    "write_resource"
+  ]
+}
+```
+
+#### The Zuul Session Cookie Name
+
+`server.servlet.session.cookie.name` changes the name of the cookie that Zuul will set to indicate the browser session. 
+ By default that name is `JSESSIONID` for all Java / Spring Boot applications. Cookies only contain path information, but are stored by the browser based on the host name of the server sending the cookie.
+ When a request is fired at the server, the browser will select the cookie to send based on a matching server hostname and the path information in the cookie.
+
+ If you are running more than one Spring Boot Web Application on the same machine - i.e. they all share the same hostname (like `localhost`) - and by coincidence their endpoints share similar paths (e.g. `/login`, `/`, etc.), then the session cookies from multiple applications may collide and interfere with each other leading to unforeseen effects.
+
+We therefore recommend, making the session cookie name explicit and unique among applications. With `server.servlet.session.cookie.name: ZUULSESSION ` we set the name of Zuul's cookie to such a value.
+This will avoid name clashes and allows us to run all applications on localhost without interferences. 
+
+#### Adjusting Zuul's Sensitive Headers Setting
+
+Zuul's `sensitiveHeaders` setting defines a black list of headers that should not be forwarded to downstream services. The default, if nothing is configured at all, is set to `Cookie,Set-Cookie,Authorization`, effectively stripping these three headers from an request before sending it to downstream services. This is described in [Cookies and Sensitive Headers in Zuul](https://cloud.spring.io/spring-cloud-netflix/multi/multi__router_and_filter_zuul.html#_cookies_and_sensitive_headers).
+
+What makes sense from a security point of view, needs to be adjusted when we are dealing with OAuth and JWT tokens.
+
+As we have seen above, the JWT token is transferred to downstream services inside the `Authorization: Bearer <token>` header. Hence, in order for downstream services to receive the token, we need to whitelist at least this header.  
+We do this, simply by setting `zuul.sensitiveHeaders: Cookie,Set-Cookie`, leaving the `Authorization` header out from the list.  
+Unless we do so, no JWT token will ever reach a downstream service. 
+
+You can fine-tune the sensitive header's on a [per-route basis](https://cloud.spring.io/spring-cloud-netflix/multi/multi__router_and_filter_zuul.html#_cookies_and_sensitive_headers) and you can can configure for each service [how the authorization headeris handled](https://cloud.spring.io/spring-cloud-static/spring-cloud-security/2.1.0.RELEASE/single/spring-cloud-security.html#_configuring_authentication_downstream_of_a_zuul_proxy).
+
+Note: you can also white-list *all* headers by declaring an empty `sensitiveHeaders`-list like so: `zuul.sensitiveHeaders: `. Be careful with this, however.
+
+### Adding `ZuulAuthorizationHeaderProxyFilter`
+
+When Zuul has fetched a JWT token from the OAuth 2.0 Authorization Server, it needs to add it to downstream service requests using the `Authorization: Bearer <token>` header.
+You can configure which downstream services the token will be forwarded to, and for which ones you don't want this to happen. See [Configuring Authentication Downstream of a Zuul Proxy](https://cloud.spring.io/spring-cloud-static/spring-cloud-security/2.1.0.RELEASE/single/spring-cloud-security.html#_configuring_authentication_downstream_of_a_zuul_proxy) for details.
+
+Zuul adds the encoded JWT token inside the following header `authorization: bearer <encoded token value>`. Notice, that the `bearer` part is **all lower-case**. At the time of writing, the most current version of Spring Security is version `5.1.5`.  
+In this version, Spring Security is checking the `Authorization` header's value in a case sensitive way. Hence it will reject requests at downstream services unless they contain a (case-insensitive) `authorization` header with the (case sensitive) `Bearer <token>` value.  
+This will be fixed in later Spring Security versions, but to make sure we don't run into this issue again, we created a custom Zuul filter that rewrites the header to fit the format currently expected by Spring Security.
+
+The filter is implemented in class [`ZuulAuthorizationHeaderProxyFilter`](./zuul.service/src/main/java/com/sap/cloud/zuul/service/ZuulAuthorizationHeaderProxyFilter.java):
+
+The filter is implemented in class [`ZuulAuthorizationHeaderProxyFilter`](./zuul.service/src/main/java/com/sap/cloud/zuul/service/ZuulAuthorizationHeaderProxyFilter.java) and works as follows:
+* It places itself right after Spring Cloud Security OAuth 2.0's `OAuth2TokenRelayFilter`
+* It only executes if the request contains `Authorization` or `authorization` as a result of `OAuth2TokenRelayFilter`
+* If an authorization header is present, it rewrites the `bearer` part and replaces it with `Bearer`.
+
+It is registered in class `ZuulBeanConfigurations` as yet another Spring bean: `
+```java
+@Configuration
+public class ZuulBeanConfigurations {
+  @Bean
+  public ZuulAuthorizationHeaderProxyFilter authorizationHeaderFilter(ZuulProperties zuulProperties, DiscoveryClientRouteLocator routeLocator) {
+      return new ZuulAuthorizationHeaderProxyFilter(zuulProperties, routeLocator);      
+  }
+  ...
+}
+```
+
+### Debug Utilities
+
+Debugging Spring Security can be tricky at times, especially, since - with all the auto-configurations going on in the background, you can never be sure what the Spring Security filter chain actually looks like.
+
+You can enable debugging for Spring Security by specifying the `debug = true` property of the `@EnableWebSecurity` annotation like so:
+```java
+@EnableWebSecurity(debug = true)
+public class ZuulWebSecurityConfiguration extends WebSecurityConfigurerAdapter {
+  ...
+}
+```
+❗️Don't use this in production, however, as it produces more logs and might expose sensitive information.
+
+To make debugging easier, we also provide a configuration that can list all Spring Security filters and allows you to add your custom one. See class `SecurityDebugFiltersConfiguration` for details.  
+You can enable the configuration simply by importing it in `ZuulWebSecurityConfiguration` like so:
+
+```java
+@EnableWebSecurity(debug = true)
+@Import(SecurityDebugFiltersConfiguration.class)  
+public class ZuulWebSecurityConfiguration extends WebSecurityConfigurerAdapter {
+  ...
+}
+```
+
+## Protecting Access to `address.service`
+
+With Zuul properly configured, we now can configure our downstream services to check for JWT tokens. The intention is to have the service reject all requests that do not provide a JWT token as proof of proper authorizations.  
+We have chosen `address.service` to show the configurations. You could use the same principles for any other service as well.
+
+Technically, `address.service` plays the role of an OAuth 2.0 Resource Server. Its resources are the functionalities it provides and the data it exposes. Using JWT tokens and scopes, access to these resources can be controlled in a very fine-grain way.
+
+### Adding Maven Dependencies
+
+In `pom.xml` of `address.service` you need to add the following dependencies:
+
+```xml
+<!-- For general security support -->
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-security</artifactId>
+</dependency>
+
+<!-- For OAuth 2.0 Resource Server support -->
+<dependency>
+  <groupId>org.springframework.security</groupId>
+  <artifactId>spring-security-oauth2-resource-server</artifactId>
+</dependency>
+
+<!-- For JWT support -->
+<dependency>
+  <groupId>org.springframework.security</groupId>
+  <artifactId>spring-security-oauth2-jose</artifactId>
+</dependency>
+
+``` 
+
+For our services, we can use plain **Spring Security** (which now has first-class-citizen support for OAuth 2.0). No legacy **Spring Security OAuth 2.0** and **Spring Security OAuth 2.0 Boot** are required anymore.
+(See [Understanding Spring Security Versions](https://github.wdf.sap.corp/Apollo-Evaluation/SpringBoot-Security-OAuth#understanding-spring-security-versions)) for details.
+
+### Adding OAuth 2.0 Configurations
+
+The necessary configurations for `address.service` to find the OAuth 2.0 Authorization Server endpoints are very few:
+```yaml
+---
+spring:
+  application:
+    name: address-service
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: http://localhost:10080
+```
+Notice that the configurations are under `spring.security.oauth2` as opposed to `security.oauth2` in the Zuul case. This is simply because we are using plain *Spring Security* here, whereas Zuul still needs to resort to
+the legacy *Spring Security OAuth 2.0* library.
+
+Since our local OAuth 2.0 Authorization Server implements the `/.well-known/openid-configuration` endpoint, we can specify the `spring.security.oauth2.resourceserver.jwt.issuer-uri` here.
+Based on this URI, Spring Security will derive the OAuth 2.0 auto-configuration endpoint as `http://localhost:10080/.well-known/openid-configuration`, and under this endpoint will find a JSON document that contains all the relevant endpoint addresses an OAuth 2.0 resource server needs to auto-configure itself. In particular, this includes the `jwk-set-uri`, which otherwise would have to be specified explicitly like this:
+
+```yaml
+---
+spring:
+  application:
+    name: address-service
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: http://localhost:10080/.well-known/jwks.json
+```
+
+### Adding `WebSecurityConfigurations` Class
+
+To configure access to `address.service`'s endpoints, we need to create a Spring `WebSecurityConfigurer` implementation. This is done in `WebSecurityConfigurations`:
+
+```java
+@EnableWebSecurity(debug = true)
+@EnableGlobalMethodSecurity(prePostEnabled = true, securedEnabled = true, jsr250Enabled = true)
+public class WebSecurityConfigurations extends WebSecurityConfigurerAdapter {
+    
+    @Override
+    protected void configure(HttpSecurity http) throws Exception {
+        configure_UsingStandardJWT(http);
+    }
+
+    private void configure_UsingStandardJWT(HttpSecurity http) throws Exception {
+        // @formatter:off
+        http
+            .sessionManagement()
+                .sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+            .and()
+                .authorizeRequests()
+                    .antMatchers("/actuator/**").permitAll()
+                    .antMatchers("/v1/address").hasAuthority("SCOPE_read_resource") // made possible by the xsAppNameReplacingAuthoritiesExtractor() that was added using .jwtAuthenticationConverter().
+                    .anyRequest().authenticated()
+            .and()
+                .oauth2ResourceServer()
+                    .jwt();
+        // @formatter:on 
+    } 
+}
+```
+
+This configuration turns off the creation of sessions - after all we would like to keep our microservices stateless. Then it specifies that 
+* All requests going to Spring Actuator endpoints should be permitted without authentication and authorization checks.
+* Requests targeting the `/v1/address` endpoint will only be permitted if the JWT token contains the scope `read_resource` (Spring internally ads the `SCOPE_` prefix by default).
+* Any other request needs to be authenticated, at least.
+
+Finally, it configures that this service should act as an OAuth 2.0 Resource Server and should use JWT as the token format.
+
+In its simplest form, that's it already. And for most applications this will already be enough. However, there are very powerful concepts in Spring that make life even more comfortable.
+Read the [Spring Global Method Security](#spring-global-method-security) section for an example. 
+
+### Spring Global Method Security
+In the `WebSecurityConfiguration` above, notice the `@EnableGlobalMethodSecurity(prePostEnabled = true, securedEnabled = true, jsr250Enabled = true)` annotation.  
+With this annotation we opt into Spring Security's *global method security* feature.
+
+Global method security allows us to annotate methods of beans and check the currently authenticated user has the proper access rights to execute the respective method.
+
+In a simple form, we could, for example, annotate REST endpoints directly to specify for each endpoint individually, which scopes are required to allow access to it.  
+For example, in class [`RESTEndpoint`](./address.service/src/main/java/com/sap/cloud/address/service/RESTEndpoint.java) we use the following code to protect the `/v1/method` endpoint:
+```java
+@RequestMapping(value = "/v1/method", method = RequestMethod.GET)
+@PreAuthorize("hasAuthority('SCOPE_read_resource')")
+public String callMethodRemotely() {
+    return protectedMethod();
+}
+```
+As a result, a user will only be able to call the endpoint, if the JWT token has the scope `read_resource`. Otherwise an `access denied (403)` error will be reported.
+
+In a more advanced form, you can use global method security to annotate your bean interfaces.  
+For example, we declare a [`DataLayer`](./address.service/src/main/java/com/sap/cloud/address/service/datalayer/DataLayer.java) interface:
+
+```java
+public interface DataLayer {
+
+    @PreAuthorize("hasAuthority('SCOPE_read_resource')") // using SpEL to declare authz checks.
+    String readData();
+    
+    @PreAuthorize("hasAuthority('SCOPE_write_resource')") // using SpEL to declare authz checks.
+    void writeData(String data);
+}
+```
+
+We then define an implementation of this interface in [`DataLayerImpl`](./address.service/src/main/java/com/sap/cloud/address/service/datalayer/DataLayerImpl.java) like this:
+
+```java
+public class DataLayerImpl implements DataLayer {
+    private static final Logger logger = LoggerFactory.getLogger(DataLayerImpl.class);
+    
+    @Override
+    public String readData() {
+        logger.info("Reading data.");
+        return "You got the data";
+    }
+
+    @Override
+    public void writeData(String data) {
+        logger.info("Writing data: {}", data);
+    }
+}
+```
+
+And finally we provide a configuration that publishes `DataLayer` beans:
+
+```java
+@Configuration
+public class DataLayerConfiguration {
+
+    @Bean
+    public DataLayer dataLayer() {
+        return new DataLayerImpl();
+    }
+}
+```
+
+As a result, we can now `@Autowire` a `DataLayer` into our `RESTEndpoint` class, and expose the following additional endpoints:
+
+```java
+@RequestMapping(value = "/v1/readData", method = RequestMethod.GET)
+public String readFromDataLayer() {
+    return dataLayer.readData();
+}
+
+@RequestMapping(value = "/v1/writeData", method = RequestMethod.POST)
+public void writeToDataLayer() {
+    dataLayer.writeData("Spring Rocks!");
+}
+```
+
+Having annotated the `DataLayer` interface methods with `@PreAuthorize`, Spring Security wraps itself around instance of the `DataLayer` bean and checks - in this case before the methods are called - whether the annotated scopes are granted in the JWT token.  
+It is that simple, and that powerful. 
+
+You can try it out by calling `http://localhost:8888/address-service/v1/readData` with a running Eureka, Zuul and Adress-Service instance.
+
+Note, that there are other annotations than `@PreAuthorize`, e.g. short forms defined by JSR-250, `@RolesAllowed` and `@Secured`.
+Particularly interesting, however, are the `@PreFilter`, `@PostFilter` and `@PostAuthorize` annotations. These could be used to implement application-level **instance-based authorizations**.
+All of the annotations above allow using Spring Expression Language (SpEL) - a kind of scripting language - by which very powerful, dynamic access checks can be defined.  
+
+For more information see [Global Method Security](https://www.baeldung.com/spring-security-method-security).
+
+## Further Reading
+In the references section you can find a wealth of links to further information. We would like to point out three explicitly here.
+First, there is an excellent [Spring Boot and OAuth2 Tutorial](https://spring.io/guides/tutorials/spring-boot-oauth2/). Furthermore, there are [Spring Security Code Samples](https://github.com/spring-projects/spring-security/tree/5.1.5.RELEASE/samples) that are really helpful. And finally, [Spring Cloud Security](https://cloud.spring.io/spring-cloud-static/spring-cloud-security/2.1.0.RELEASE/single/spring-cloud-security.html).
+
+Also note that there are plenty of [Spring Guides](https://github.com/spring-guides) available - straight from the makers and backed with code.
+
 # What's Next?
+  * xsuaa integration
   * feature flags - to expose new features selectively.
   * blue-green & zero downtime deployments
   * service version strangling 
   * authenticate client requests
   * restrict access to services
-  
 
 # References
 * Spring Cloud Netflix
@@ -2742,8 +3256,22 @@ This shows all the necessary concepts required for realizing things like:
   * [Ribbon: Unable to set default configuration using @RibbonClients(defaultConfiguration=...)](https://github.com/spring-cloud/spring-cloud-netflix/issues/374)
   * [Understanding Application Context](https://spring.io/understanding/application-context)
   * [Client Side Load Balancing with Ribbon and Spring Cloud](https://spring.io/guides/gs/client-side-load-balancing/)
-  
 * Canary Testing with Zuul
   * [Enabling Groovy Filters in Spring Cloud Netflix Zuul](https://stackoverflow.com/questions/49289584/spring-cloud-zuul-and-groovy-filters)
   * [Canary Testing](https://martinfowler.com/bliki/CanaryRelease.html)
   * [Dynamic Zuul Routes](https://dzone.com/articles/persistent-and-fault-tolerant-dynamic-routes-using)
+* Integration of Zuul with OAuth 2.0
+  * [Spring Web MVC](https://docs.spring.io/spring/docs/3.2.x/spring-framework-reference/html/mvc.html)
+  * [Spring Cloud Security](https://cloud.spring.io/spring-cloud-static/spring-cloud-security/2.1.0.RELEASE/single/spring-cloud-security.html)
+  * [Spring Boot OAuth 2.0 Support](https://docs.spring.io/spring-boot/docs/current/reference/htmlsingle/#boot-features-security-oauth2)
+  * [Spring Security OAuth 2.0 Resource Server](https://docs.spring.io/spring-security/site/docs/current/reference/htmlsingle/#oauth2resourceserver)
+  * [Spring Security Samples](https://github.com/spring-projects/spring-security/tree/5.1.5.RELEASE/samples)
+  * [Spring Guides](https://github.com/spring-guides)
+  * [How the Spring Security Filter Chain works](https://stackoverflow.com/questions/41480102/how-spring-security-filter-chain-works)
+  * [Spring Boot and OAuth2 Tutorial (Excellent!)](https://spring.io/guides/tutorials/spring-boot-oauth2/)
+  * [Cookies and Sensitive Headers in Zuul](https://cloud.spring.io/spring-cloud-netflix/multi/multi__router_and_filter_zuul.html#_cookies_and_sensitive_headers)
+  * [Configuring Downstream Authentication](https://cloud.spring.io/spring-cloud-static/spring-cloud-security/2.1.0.RELEASE/single/spring-cloud-security.html#_configuring_authentication_downstream_of_a_zuul_proxy)
+  * [(New) SAP Java Container Security Library](https://jam4.sapjam.com/questions/X03QVJ2JGtLUiCb5xoCAEJ)
+  * [(New) SAP Java Container Security Library GitHub](https://github.com/SAP/cloud-security-xsuaa-integration)
+  * [Spring Global Method Security](https://www.baeldung.com/spring-security-method-security)
+  * [Spring Expression Language (SpEL)](https://docs.spring.io/spring/docs/3.0.x/reference/expressions.html)

@@ -1,0 +1,93 @@
+{
+	"info": {
+		"_postman_id": "f8b28fb0-db14-4dc7-a4ab-cbf022c7032c",
+		"name": "Zuul Requests",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Zuul Create Route",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"name": "Content-Type",
+						"value": "application/json",
+						"type": "text"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{ \n  \"requestURIUniqueKey\" : \"1234-2345-12335-23235\", \n  \"requestURI\": \"/googlemaps\",\n  \"targetURLHost\": \"www.google.com\", \n  \"targetURLPort\": \"80\", \n  \"targetURIPath\": \"/maps\" \n}"
+				},
+				"url": {
+					"raw": "http://localhost:8888/v1/createRoute",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8888",
+					"path": [
+						"v1",
+						"createRoute"
+					]
+				},
+				"description": "Creates a Zuul route at runtime."
+			},
+			"response": []
+		},
+		{
+			"name": "Zuul Logout",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "X-XSRF-TOKEN",
+						"value": " 0b1706eb-ceea-402a-b6c4-dd52f0666b58",
+						"type": "text"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": ""
+				},
+				"url": {
+					"raw": "http://localhost:8888/logout",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8888",
+					"path": [
+						"logout"
+					]
+				},
+				"description": "POST request to logout from Zuul and invalidate the session."
+			},
+			"response": []
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"id": "e3477cea-a2bd-4a36-9941-a6abb38b31ff",
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"id": "b2934be0-3c6e-4721-9cce-92128085aa17",
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		}
+	]
+}

@@ -1,10 +1,15 @@
 package com.sap.cloud.zuul.service;
 
+import org.springframework.cloud.client.loadbalancer.LoadBalanced;
 import org.springframework.cloud.netflix.zuul.filters.RouteLocator;
 import org.springframework.cloud.netflix.zuul.filters.ZuulProperties;
 import org.springframework.cloud.netflix.zuul.filters.discovery.DiscoveryClientRouteLocator;
+import org.springframework.cloud.security.oauth2.proxy.OAuth2TokenRelayFilter;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.security.oauth2.client.OAuth2ClientContext;
+import org.springframework.security.oauth2.client.OAuth2RestTemplate;
+import org.springframework.security.oauth2.client.resource.OAuth2ProtectedResourceDetails;
 
 import com.sap.cloud.zuul.service.filters.RouteLoggingZuulFilter;
 import com.sap.cloud.zuul.service.filters.canaryrouting.RibbonCanaryFilter;
@@ -15,6 +20,43 @@ import com.sap.cloud.zuul.service.filters.samples.route.CustomRouteFilter;
 
 @Configuration
 public class ZuulBeanConfigurations {
+    
+    /**
+     * Custom PRE-filter running after {@link OAuth2TokenRelayFilter} to rectify the 
+     * {@code Authorization: Bearer <token>}  header. Spring Security OAuth2 (introduced via 
+     * Spring Cloud Security & {@code @EnableOAuth2Sso} adds a JWT token retrieved from the Authorization 
+     * server to downstream Zuul requests (i.e. requests targeting downstream services).
+     * 
+     * The header added is of the form {@code authorization: bearer <token>} instead of
+     * {@code authorization: Bearer <token>} which is required (as of a bug) by Spring Security 5.1.x
+     * 
+     * This filter fixes this issue, by rewriting the header to look as follows:
+     * {@code authorization: Bearer <token>}. 
+     * 
+     * With it in place downstream services can properly read the token from the request and authenticate 
+     * / authorize the requests.
+     *  
+     * @param zuulProperties the Zuul configuration properties.
+     * @param routeLocator the route locator.
+     * @return the {@code ZuulAuthorizationHeaderProxyFilter} rewriting the header.
+     */
+    @Bean
+    public ZuulAuthorizationHeaderProxyFilter authorizationHeaderFilter(ZuulProperties zuulProperties, DiscoveryClientRouteLocator routeLocator) {
+        return new ZuulAuthorizationHeaderProxyFilter(zuulProperties, routeLocator);      
+    }
+    
+    /**
+     * Creates a load-balanced (i.e. Ribbon-backed) RestTemplate that will automatically refresh expired tokens
+     * under the hood.
+     * @param resource
+     * @param context
+     * @return
+     */
+    @LoadBalanced
+    @Bean
+    public OAuth2RestTemplate OAuth2RestTemplate(OAuth2ProtectedResourceDetails resource, OAuth2ClientContext context) {
+      return new OAuth2RestTemplate(resource, context);
+    }
     
     /**
      * Custom PRE-filter that will intercept a request, hand it down to a custom Ribbon IRule that 

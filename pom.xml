@@ -1,23 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
-	<modelVersion>4.0.0</modelVersion>
+  <modelVersion>4.0.0</modelVersion>
 
-	<groupId>com.sap.cloud</groupId>
-	<artifactId>spring-netflix-parent</artifactId>
-	<packaging>pom</packaging>
-	<version>0.0.1-SNAPSHOT</version>
+  <groupId>com.sap.cloud</groupId>
+  <artifactId>spring-netflix-parent</artifactId>
+  <packaging>pom</packaging>
+  <version>0.0.1-SNAPSHOT</version>
 
-	<name>Parent Pom for Spring Cloud Netflix Projects</name>
+  <name>Parent Pom for Spring Cloud Netflix Projects</name>
 
-	<modules>
-		<module>address.service</module>
-		<module>address.service.v2</module>
-		<module>address.service.client</module>
-		<module>employee.service</module>
-		<module>employee.service.client</module>
-		<module>eureka.service</module>
-		<module>zuul.service</module>
-		<module>hystrix-dashboard</module>
+  <modules>
+    <module>address.service</module>
+    <module>address.service.v2</module>
+    <module>address.service.client</module>
+    <module>employee.service</module>
+    <module>employee.service.client</module>
+    <module>eureka.service</module>
+    <module>zuul.service</module>
+    <module>hystrix-dashboard</module>
     <module>turbine</module>
     <module>diagnostics.service</module>
   </modules>
