@@ -8,6 +8,8 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 
+import com.netflix.hystrix.contrib.javanica.annotation.HystrixCommand;
+
 /**
  * Feign-client based AddressService client.
  * Feign client is a declarative REST client
@@ -26,11 +28,20 @@ public class FeignEmployeeServiceClient {
     @Autowired
     private EmployeeServiceProxy employeeServiceProxy;
 
-    public void getEmployee() {
+    @HystrixCommand(fallbackMethod = "onErrorFallback", commandKey = "employee-service/employee")
+    public String getEmployee() {
         Employee employee = employeeServiceProxy.loadEmployee();
         
+        String employeeString = employee.toString();
         logger.info("Employee from FeignClient: ");
-        logger.info(employee.toString());
+        logger.info(employeeString);
+        
+        return employeeString;
+    }
+    
+    @SuppressWarnings("unused")
+    private String onErrorFallback() {
+        return "Returning some employee from a local cache. This is eventual consistency in action!";        
     }
 }
 

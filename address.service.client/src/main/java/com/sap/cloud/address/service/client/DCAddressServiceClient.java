@@ -21,6 +21,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.netflix.appinfo.InstanceInfo;
 import com.netflix.discovery.EurekaClient;
+import com.netflix.hystrix.contrib.javanica.annotation.HystrixCommand;
 
 /**
  * DiscoveryClient-based Address Service Client. Uses the
@@ -43,7 +44,8 @@ public class DCAddressServiceClient {
     @Autowired
     private EurekaClient eurekaClient;
 
-    public void getAddress() throws RestClientException, IOException {
+    @HystrixCommand(fallbackMethod = "onErrorFallback")
+    public String getAddress() throws RestClientException, IOException {
         
         String baseUrlFromEurekaClient = getServiceURLwithEurekaClient();
         String baseUrlFromSpringDiscoveryClient = getServiceURLwithSpringDiscoveryClient();
@@ -64,7 +66,10 @@ public class DCAddressServiceClient {
         } catch (Exception ex) {
             logger.error("Caught exception during RestTemplate call.", ex);
         }
-        logger.info(response.getBody());
+        
+        String responseBody = response.getBody();
+        logger.info(responseBody);
+        return responseBody;
     }
 
     private static HttpEntity<?> getHeaders() throws IOException {
@@ -129,5 +134,14 @@ public class DCAddressServiceClient {
 
             logger.info("-------------------------------------------------------");
         }
+    }
+
+    // this method is a fallback called by Hystrix, in case 
+    // the getAddress() call fails. The method signature of the 
+    // fallback method needs to match that of the original service 
+    // method that is executed as a Hystrix command.
+    @SuppressWarnings("unused") // Ugly. Note this is only required since Hystrix uses Strings to declare fallback methods.
+    private String onErrorFallback() {
+        return "Returning some address from a local cache. This is eventual consistency in action!";        
     }
 }

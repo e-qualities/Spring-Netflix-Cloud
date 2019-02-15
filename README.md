@@ -52,6 +52,21 @@ Table of Contents
          * [Zuul Configurations](#zuul-configurations)
          * [Deploying Zuul Service](#deploying-zuul-service)
          * [Testing Zuul](#testing-zuul)
+      * [Advanced Zuul Configurations](#advanced-zuul-configurations)
+         * [Location Header Rewriting](#location-header-rewriting)
+         * [Cross Origin Requests](#cross-origin-requests)
+   * [Hystrix](#hystrix)
+      * [What is Circuit Breaking](#what-is-circuit-breaking)
+      * [What Does Hystrix Do?](#what-does-hystrix-do)
+         * [Hystrix and Reactive Java](#hystrix-and-reactive-java)
+      * [Integrating Hystrix](#integrating-hystrix)
+         * [Address Service Changes](#address-service-changes)
+         * [Address Service Client Changes](#address-service-client-changes)
+         * [Implicit Hystrix Integration](#implicit-hystrix-integration)
+      * [The Hystrix Dashboard Application](#the-hystrix-dashboard-application)
+      * [Trying Out Hystrix](#trying-out-hystrix)
+      * [The Need for Command Keys](#the-need-for-command-keys)
+      * [Hystrix Alternatives](#hystrix-alternatives)
    * [What's Next?](#whats-next)
    * [References](#references)
 
@@ -807,7 +822,7 @@ spring.profiles: cloud
 eureka:
   client: 
     serviceUrl:
-      defaultZone: ${eureka-server-url}/eureka  # URL of the form https://<unique prefix>-eureka-server.cfapps.eu10.hana.ondemand.com/eureka
+      defaultZone: ${eureka-server-url}/eureka  # URL of the form https://<unique prefix>-eureka-server.<your cf domain>/eureka
                                                 # Resolved from environment set in manifest.yml
   instance:
     homePageUrl:          https://${vcap.application.uris[0]:localhost}/   
@@ -902,17 +917,361 @@ By default Zuul routes all Cross Origin requests (CORS) to the services. If you 
 
 See [more information here](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_enabling_cross_origin_requests).
 
+# Hystrix
+
+Hystrix is a circuit breaker component developed by Netflix and available in Spring Boot.  
+Spring Boot applications can integrate hystrix easily via annotations.
+
+Hystrix comes with a **dashboard application** as well. You can use it to monitor the state of the circuits of your system, thus giving you an indicator for your overall system health!
+
+## What is Circuit Breaking
+
+Circuit breaking aims at solving the following problem:  
+If you create a service (or client) that calls a number of other services, it is only a matter of time, until these dependency services will fail and become unavailable. A common pattern in the Cloud is to retry then - i.e. resend the request that failed, hoping that the service downtime will only be a temporary issue.  
+However, this can lead to a set of issues:
+
+1. While your service is busy sending retries, it cannot respond to the clients that called it. This can yield a poor user experience or cause an entire system to be "busy waiting".  
+Even worse, it might bring down your service as well, as now more and more client requests are queueing up, that your service cannot serve.
+
+1. If the dependency service is really down, needs to be restarted or is desperately trying to recover from its failure, a repeated and potentially huge amount of retry requests will place it under continuous fire and cause an untimely, cruel and painful death...
+   
+1. Even worse, if the service was dead and just got restarted, the continous retry-fire might just bring it down again.
+
+Circuit breaking resolves these issues by introducing a series of timeouts and fallbacks that kick in, when a dependency service fails to respond.  
+If your service calls a dependency service and that call fails, it might retry a number of times (e.g. 3 times).  
+However, if all these retries also fail, maybe it is fair to assume that the service you are calling is down or needs a break.  
+
+That's the moment the circuit breaker kicks in. Rather than continuing to call the service, the *circuit is opened* and a fallback is executed.  
+In particular, this means your service should stop retrying, and serve its own client with a fallback response. 
+
+Such a fallback response may be a cached object that was previously retrieved from the now failing service.  
+This will lead to *eventual consistency*, because we are returning a cached object, of which we cannot be sure that it still represents a consistent state of data - after all it might have changed in the meantime. However, this risk of a slight inconsistency is still better than not being able to answer to your clients and risk to be overloaded as well.
+
+After some time, your service may try to contact the dependency service again - hoping that by then it will have recovered. But until then, clients will be served via the fallback.
+
+## What Does Hystrix Do?
+
+Hystrix is a framework that frees you from the heavy lifting of implementing the circuit breaker pattern.  
+In its purest form, Hystrix allows you to wrap the - potentially failing - code that calls to a dependency service into a `HysterixCommand`.  
+This command is then executed on a Thread from a pool maintained by Hystrix. 
+
+Hystrix will monitor the result of the threaded executions of different requests and - in case of repeated failure - will "open the circuit" by calling a fallback method you have defined.
+
+Hystrix can be configured in terms of timeouts, pool size, execution model (Thread vs. Semaphore) etc. (see [here](https://github.com/Netflix/Hystrix/tree/master/hystrix-contrib/hystrix-javanica#configuration)).  
+Furthermore, Hystrix comes with its own dashboard application, that monitors services and lists the status of their circuits - i.e. their connectivity to dependency services.
+
+### Hystrix and Reactive Java
+
+Hystrix is mostly shown in scenarios, where service developers use synchronous, i.e. blocking code when calling their dependency services.  
+However, Hystrix also supports asynchronous and reactive patterns. For support via annotations see the [Asynchronous Execution](https://github.com/Netflix/Hystrix/tree/master/hystrix-contrib/hystrix-javanica#asynchronous-execution) and [Reactive Execution](https://github.com/Netflix/Hystrix/tree/master/hystrix-contrib/hystrix-javanica#reactive-execution) sections of *Javanica* or the same sections for plain [Netflix Hystrix](https://github.com/Netflix/Hystrix/wiki/How-To-Use#Asynchronous-Execution).
+You can find additional information in [this post](https://stackoverflow.com/questions/50688177/how-to-use-hystrix-with-spring-webflux-webclients). 
+
+It should further be noted, that if you are using Spring WebFlux you get some of Hystrix' qualities as well, as described in [this post](https://stackoverflow.com/questions/53282413/is-really-necessary-to-use-hystrix-with-reactive-spring-boot-2-application). However, Hystrix is not involved, and so the dashboard integration will most likely not be available.
+
+When making a decision for or against one of the above technologies you use, keep in mind however, that **monitoring of your circuits is essential information for your runtime operations**.  
+An open circuit reported by a service means that one of its dependencies is unavailable, and therefore a failure fallback is currently active.  
+You want to be able to detect and monitor this kind of scenario to make sure your Cloud services are acting as intended and to analyse error reports.
+
+Make your decision also based on this aspect.
+
+## Integrating Hystrix
+
+To integrate hystrix in your project you need to do the following steps:
+1. Add `spring-cloud-starter-netflix-hystrix` to your pom.xml
+1. Annotate your Spring Boot application with `@EnableCircuitBreaker`
+1. Annotate the code that makes potentially failing remote calls with `@HystrixCommand(fallbackMethod="...", commandKey="...")`
+1. Provide a fallback method to be called by Hystrix in case the call failed, or when the circuit is open.
+1. Expose the `/actuator/hystrix.stream` endpoint on your service, so that the Hystrix status can be monitored later.
+
+We show this in the [`address.service`](./address.service) and [`address.service.client`](./address.service.client) projects as desribed below.
+
+### Address Service Changes
+
+To show Hystrix in action, we need a failing service. Therefore, we have modified the [`RESTEndpoint`](./address.service/src/main/java/com/sap/cloud/address/service/RESTEndpoint) class of `address.service` slightly to now fail randomly using the following block:
+
+```java
+  //simulate random errors
+  if(Math.random() > .5) {
+      Thread.sleep(3 * 1000);
+      throw new RuntimeException("Simulating random ADDRESS-SERVICE downtime.");
+  }
+```
+
+Whenever a new request comes in, it might randomly succeed or fire an exception.
+
+### Address Service Client Changes
+
+In `address.service.client` we have introduced a new class: [`RESTEndpoint`](./address.service.client/src/main/java/com/sap/cloud/address/service/client/RESTEndpoint). This is exposing a simple REST endpoint to query an address from `address.service` via `address.service.client`.
+
+With it, we can simulate a service calling another service (`address.service`) with the latter being unstable.
+
+`RESTEndpoint` uses an instance of `ETAddressServiceClient` instance (named `serviceProxy`) to call the remote service:
+
+```java
+    @Autowired
+    private ETAddressServiceClient serviceProxy;
+
+    @RequestMapping(value = "/call-address-service", method = RequestMethod.GET)
+    public String callRemoteAddressService() throws Exception {
+        return serviceProxy.getAddress();
+    }
+```
+
+**Note:** `RESTEndpoint` could just as well use `DCAddressServiceClient` or `FeignAddressServiceClient`. The descriptions below are analogous for these classes.
+
+`ETAddressServiceClient` is modified to look as follows: 
+
+```java
+public class ETAddressServiceClient {
+
+    @Autowired
+    private RestTemplate restTemplate;
+    
+    @HystrixCommand(fallbackMethod = "onErrorFallback", commandKey = "address-service/address")
+    public String getAddress() throws RestClientException, IOException {
+        Address address = restTemplate.getForObject("http://address-service/address", Address.class);
+        
+        String addressString = address.toString();
+        System.out.println("Address from RestTemplate: ");
+        System.out.println(addressString);
+        
+        return addressString;
+    }
+  
+    @SuppressWarnings("unused")
+    private String onErrorFallback() {
+        return "Returning some address from a local cache.";        
+    }
+}
+```
+
+Notice the `@HystrixCommand` annotation. This annotation is provided by Spring Boot and a library called *Javanica* which wraps Netflix Hystrix.  
+
+`@HystrixCommand` essentially tells Hystrix to execute the `getAddress()` method on a Thread managed by Hystrix and monitor its success status.   
+If the remote call fails, the method named `onErrorFallback` is called - as specified by the `fallbackMethod` property.  
+
+A productive implementation of `onErrorFallback()` might serve an address which could have been cached when it was retrieved from `address.service` while the service was still functional. 
+
+This may lead to eventual consistency - the cached address might have changed since the last time `address.service` was successfully contacted!   
+However, that is a price we are willing to pay in order to stay responsive.  
+
+The `commandKey` property is used to group Hystrix commands together. This is particularly important for statistics reporting in tools like Turbine and showing up in the dashboard.  
+The general rule of thumb is, that you should specify a value for `commandKey` that describes the *service* and the *endpoint* of the service the code executed by the `HystrixCommand` will call. See section [The Need for Command Keys](#the-need-for-command-keys) below.
+
+**Note:** Hystrix supports response caching, so if you want to serve cached results in case of a fallback, you don't necessarily have to cache it yourself.  
+See the [Hystrix Documentation on Request Caching and Fallbacks](https://github.com/Netflix/Hystrix/wiki/How-To-Use) as well as the [documentation of the *Javanica* library](https://github.com/Netflix/Hystrix/tree/master/hystrix-contrib/hystrix-javanica#request-cache) that wraps these functions into annotations.
+
+Finally, we also need to annotate the SpringBoot application of `address.service.client` with the special `@EnableCircuitBreaker` annotation:
+
+```java
+@SpringBootApplication
+@EnableCircuitBreaker
+public class ClientApp {
+    
+    public static void main(String[] args) throws RestClientException, IOException {
+      ...
+    }
+```
+
+To resolve these dependencies, the `pom.xml` of `address.service.client` was extended by the following dependency:
+
+```xml
+<dependency>
+  <groupId>org.springframework.cloud</groupId>
+  <artifactId>spring-cloud-starter-netflix-hystrix</artifactId>
+</dependency>
+```
+
+Eventually, to expose the `/actuator/hystrix.stream` endoint and make Hystrix health information available via the `/actuator/health` endpoint as well, we added the following lines to `application.yml`:
+
+```yaml
+management.endpoints.web.exposure.include: "*"    # NOT FOR PRODUCTION: expose all actuator endpoints for simplicity. You could also expose individual ones, e.g. 'hystrix.stream'
+management.endpoint.health.show-details: always   # NOT FOR PRODUCTION: always show all health details of all components of the service for simplicity.
+```
+
+### Implicit Hystrix Integration
+
+The samples shown above integrate Hystrix explicitly. You need to add Hystrix to the classpath / `pom.xml` and you need to use the `@HystrixCommand` annotation to the method that will make the remote call.
+
+There is a more elegant way to do that - if you are using `FeignClient`.  
+`FeignClient` is a declarative REST client, and you can enable implicit Hystrix wrapping of `FeignClient` methods.  
+This is done in `application.yml`.
+
+This is shown in `address.service.client`'. Its [`application.yml`](./address.service.client/src/main/resources/application.yml) shows the following lines:
+
+```yaml
+feign.hystrix.enabled: true                     
+
+# Adjust connection timeouts of Hystrix and Ribbon.
+# Make sure that Hystrix (the circuit breaker) times out later  
+# than Ribbon (the HTTP client) does. When Ribbon times out, it might
+# retry requests (if Spring Retry is on the classpath). These retries
+# should also be included into the Hystrix timeout. Only if Ribbon (and
+# all its retry attempts) have timed out, Hystrix should get active.
+hystrix.command.default.execution.isolation.thread.timeoutInMilliseconds: 11000
+ribbon.ConnectTimeout: 10000 # timeout for establishing a connection.
+ribbon.ReadTimeout: 10000    # timeout for receiving data after connection is established.
+```
+The first line in the snippet above enables Hystrix for all FeignClients of the given project. The lines below are simply to set the timing right between Ribbon (which acts as the underlying load balancer and has its own "low-level circuit breaking") and Hystrix - making sure that Hystrix will notice errors only when Ribbon has given up.
+
+With Hystrix enabled for all `FeignClient`s in your project, you no longer need to use the `@HystrixCommand` annotation anymore. However, you still need to declare the **fallback** to use in case Hystrix receives a server error or opens the circuit. You can declare a simple fallback, or a slightly more complex one, in case you also need access to the exception encountered by Hystrix.
+
+This is shown in classes [`HystrixAddressServiceProxy`](./address.service.client/src/main/java/com/sap/cloud/address/service/client/feignhystrix/HystrixAddressServiceProxy.java) and [`HystrixAddressServiceProxyWithException`](./address.service.client/src/main/java/com/sap/cloud/address/service/client/feignhystrix/HystrixAddressServiceProxyWithException.java) respectively.
+
+```java
+@FeignClient(name = "address-service", fallback = HystrixAddressServiceProxyFallback.class, contextId = "Address-Client-1") 
+public interface HystrixAddressServiceProxy {
+    @RequestMapping(method = RequestMethod.GET, value = "/address")
+    Address loadAddress();
+}
+
+@FeignClient(name = "address-service", fallbackFactory = HystrixClientFallbackFactory.class, contextId = "Address-Client-2")
+public interface HystrixAddressServiceProxyWithException {
+    @RequestMapping(method = RequestMethod.GET, value = "/address")
+    Address loadAddress();
+}
+```
+
+Both `FeignClient`s are declared as interfaces. `HystrixAddressServiceProxy` uses the `fallback` parameter of `@FeignClient` annotation to declare a class that implements the fallback. `HystrixAddressServiceProxyWithException` uses the `fallbackFactory` parameter to point to a factory class that will create the fallback - that factory has access to the exception Hystrix received and as a result triggered the fallback for.
+
+Note also, that both `FeignClient`s access the same service (`address-service`). Usually, Spring suggests only one  `FeignClient` instance per service. If, like in this case, two or more should be used, you need to distinguish them explicitly by the `contextId` parameter.
+
+The fallback implementations look as follows:
+
+```java
+@Component
+public class HystrixAddressServiceProxyFallback implements HystrixAddressServiceProxy {
+
+    @Override
+    public Address loadAddress() {
+        Address address = new Address();
+        address.setStreetName("Fallback");
+        address.setCity("Fallback");
+        address.setCountry("Fallback");
+        address.setHouseNumber("Fallback");
+        address.setPostalCode("Fallback");
+        return address;
+    }
+}
+
+@Component
+public class HystrixClientFallbackFactory implements FallbackFactory<HystrixAddressServiceProxyWithException> {
+
+    @Override
+    public HystrixAddressServiceProxyWithException create(Throwable cause) {
+
+        return new HystrixAddressServiceProxyWithException() {
+            @Override
+            public Address loadAddress() {
+                Address address = new Address();
+                address.setStreetName("Fallback - " + cause.getMessage());
+                address.setCity("Fallback - " + cause.getMessage());
+                address.setCountry("Fallback - " + cause.getMessage());
+                address.setHouseNumber("Fallback - " + cause.getMessage());
+                address.setPostalCode("Fallback - " + cause.getMessage());
+                return address;
+            }
+        };
+    }
+}
+```
+
+## The Hystrix Dashboard Application
+
+Hystrix comes also with a dashboard application, which can be deployed as a separate Spring Boot application.  
+
+We have added this as a new project available under [`hystrix-dashboard`](./hystrix-dashboard).  
+See the project's [readme](./hystrix-dashboard/README.md) for more details.
+
+## Trying Out Hystrix
+
+To try out Hystrix in action locally, you need to:
+
+1. Execute `mvn clean package`
+2. Start `eureka.service`
+3. Start `address.service`
+4. Start `address.service.client`
+5. Start `hystrix-dashboard`
+6. Open `http://localhost:8999/hystrix`
+7. Enter the `/actuator/hystrix.stream` endpoint of `address.service.client` - i.e. `http://localhost:8081/actuator/hystrix.stream` - into the Hystrix dashboard.
+8. Click on **Monitor Stream**
+
+Now several times execute a call to `address.service.client` by continuously refreshing `http://localhost:8081/call-address-service`.  
+You will see Hystrix dashboard showing updating stats, which are being read from the `/actuator/hystrix.stream` endpoint of `address.service.client`
+
+If you want to see the circuit popping open at some point, you can try flooding the `address.service.client` with calls like so:
+
+```
+bash -c 'while [ 0 ]; do curl http://localhost:8081/call-address-service; done'
+```
+
+This will fire requests in a very fast pace against the endpoint of `address.service.client` which, in turn, calls `address.service`.  
+Sooner or later `address.service` will fail and subsequently will make Hystrix in `address.service.client` open the circuit. You can see that in the dashboard.
+The moment that happens, all requests to `address.service.client` will be responded to with a reply produced by the fallback method described above.
+
+You can also try this out in the Cloud! Just proceed as follows:
+- In the project root executue `mvn clean package`, then
+- Execute `cf push --vars-file manifest-variables.yml`.
+- Open the described services' Cloud endpoints and fire your requests at them.
+
+## The Need for Command Keys
+
+`@HystrixcCommand` annotation comes with a few properties, most notably `fallbackMethod` and `commandKey`. While the importance of `fallbackMethod` is clear, `commandKey` is equally important. Here we explain why.
+
+If a `commandKey` is not explicitly given, `HystrixCommand`s will report status information (e.g. if the circuit is open or closed) by the **name of the method** that the `@HystrixCommand` annotation decorates.  
+
+In our case, that means that status information of the three different `getAddress()` implementations (in `DCAddressServiceClient`, `ETAddressServiceClient` and `FeignAddressServiceClient`) will be aggregated into one tile in Hystrix Dashboard.
+
+In our case, this is not really a problem: we are interested in the circuit status information for the `address-service` and its `/address` endpoint.
+And all three implementations call that same `http://address-service/address` endpoint. We can thus use the Hystrix status information, e.g. if the circuit to that service and endpoint is open or closed, as a health indicator - indicating whether our service and endpoint is in trouble or fine, respectively.
+
+However, the in the dashboard we would see the status reported by the title `getAddress()`, and that does not really help!  
+We are not interested in the name of the method that implements the service call. We are interested in which service and which of its endpoints that status information is for.
+
+Hence, the general rule of thumb is:
+1. Use `commandKeys` in `@HystrixCommand` annotations.
+1. Make sure the values for `commandKey` are a combination of the *service* **and** the *endpoint* that is called.
+
+In our example, we have chosen a combination of the Eureka service ID (`address-service`) and the endpoint (`/address`). This information is enough for us to immediately identify the service and endpoint that might be in trouble.
+
+**Note:** At the time of writing, there is no way to specify a `commandKey` for `FeignClient` annotations (this should be fixed in a later release of Spring Cloud Netflix). This means you will see a combination of the `FeignClient`s name and the method name that was called on it.
+
+## Hystrix Alternatives
+
+Hystrix is not the only circuit breaker framework out there. But we believe it is one of the best.
+That said, there are alternatives - one that is often cited is [Resilience4J](https://github.com/resilience4j/resilience4j).
+Resilience4J seems to integrate nicely with Spring Boot and supports reactive patterns out of the box.  
+It is more modular than Hystrix and comes with support for a variety of frameworks like `Vertx`, `Reactor` etc.
+It includes annotations for retry-calls, integrates with metrics tools like [Prometheus](https://prometheus.io/) and comes with a [good documentation](http://resilience4j.github.io/resilience4j/).  
+All of this comes at the price of added complexity and integration effort. Whether or not Resilience4J should be favored over Hystrix depends on your project's needs and your experience in the team.
+
+[Spring Retry](https://github.com/spring-projects/spring-retry) is a Spring library that provides an easy way to annotate service calls that should be retried automatically when failing.
+Hystrix does not support retrying of commands - applications need to take care of that themselves, e.g. by fallback methods that re-execute the same Hystrix command.  
+
+Spring Retry closes that gap and can be used in combination with Hystrix.
+Indeed, if (like we do) you are using `Ribbon` as the underlying client-side load balancer - which is the case for loadbalanced `RestTemplate`s, `FeignClient` and `Zuul` - it is enough to just have Spring Retry on the classpath and  Ribbon will retry failed requests (as described [here](https://cloud.spring.io/spring-cloud-netflix/multi/multi_retrying-failed-requests.html)).
+
+This is also nicely described in [this blog post from a Spring team member](http://ryanjbaxter.com/cloud/spring%20cloud/spring/2017/03/15/retrying-http-requests-in-spring-cloud-netflix.html).  
+
+In other words, if you are using Zuul, Feign Client or `@LoadBalanced RestTemplate`'s, all you need to do is have Spring Retry on your classpath (by a `pom.xml` dependency).  
+
+How load balancing is done with `RestTemplates`, is described [here](https://cloud.spring.io/spring-cloud-static/Greenwich.RELEASE/single/spring-cloud.html#_spring_resttemplate_as_a_load_balancer_client).  
+In particular this explains that, using a service registry like Eureka, you can easily configure Spring `RestTemplate` to use Ribbon under the hood.
+Ribbon will do the client-side load balancing of the requests made by the RestTemplate, i.e. it will select service instances and internally monitor whether the instances are available or not.  
+With Ribbon using Spring Retry (if it is on the classpath), the RestTemplate requests will automatically be retried in case of failure, without having to code it explicitly.
+
+Finally, if you are using FeignClient (which [integrates with Eureka](https://www.baeldung.com/spring-cloud-netflix-hystrix)) you can also profit from retries simply by putting Spring Retry on the classpath.
 
 # What's Next?
 
-Next, we will look into how Zuul can be configured to
-* support in canary testing
-* blue-green deployments
-* zero downtime
-* authenticate client requests
-* restrict access to services
-
-But before that, we will add a little bit of Hystrix, to make our services more resilient.
+Next, we will look into how 
+* Hystrix Streams can be aggregated by Turbine
+* Zuul can be configured to
+  * support in canary testing
+  * blue-green deployments
+  * zero downtime
+  * authenticate client requests
+  * restrict access to services
 
 # References
 * [Spring Cloud Netflix Documentation](https://cloud.spring.io/spring-cloud-netflix/single/spring-cloud-netflix.html)
@@ -926,6 +1285,14 @@ But before that, we will add a little bit of Hystrix, to make our services more 
 * [Zuul Developer Guide](https://github.com/Netflix/zuul/wiki/How-it-Works)
 * [Spring Boot Actuator Endpoints](https://docs.spring.io/spring-boot/docs/current/actuator-api/html/)
 * [Spring Boot Actuator Endpoint List](https://docs.spring.io/spring-boot/docs/current/reference/htmlsingle/#production-ready-endpoints)
+* [Hystrix Spring Cloud Tutorial](https://www.youtube.com/watch?v=Kc7dDxn9cUg)
+* [Spring Cloud Hystrix Documentation](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_circuit_breaker_hystrix_clients)
+* [Hystrix Documentation](https://github.com/Netflix/Hystrix/wiki/How-To-Use)
+* [Hystrix-Javanica Documentation](https://github.com/Netflix/Hystrix/tree/master/hystrix-contrib/hystrix-javanica)
+* [Hystrix Configurations](https://github.com/Netflix/Hystrix/wiki/Configuration)
+* [Spring Open Feign](https://cloud.spring.io/spring-cloud-static/spring-cloud-openfeign/2.1.0.RELEASE/multi/multi_spring-cloud-feign.html) | [Latest Spring Open Feign Releases](https://spring.io/projects/spring-cloud-openfeign#learn) | [Netflix Open Feign](https://github.com/OpenFeign/feign)
+* [Feign Hystrix Support](https://cloud.spring.io/spring-cloud-static/spring-cloud-openfeign/2.1.0.RELEASE/multi/multi_spring-cloud-feign.html#spring-cloud-feign-hystrix)
+* [Microservice Registration and Discovery with Spring Cloud and Netflix's Eureka](https://spring.io/blog/2015/01/20/microservice-registration-and-discovery-with-spring-cloud-and-netflix-s-eureka)
 * https://www.javainuse.com/spring/springcloud
 * https://www.javainuse.com/spring/spring_eurekaregister
 * https://www.javainuse.com/spring/spring_eurekaregister2

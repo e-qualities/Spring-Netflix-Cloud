@@ -8,6 +8,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
+import com.netflix.hystrix.contrib.javanica.annotation.HystrixCommand;
+
 /**
  * Eureka - REST Template-based Address Service Client.
  * Uses RESTTemplate-Eureka-Integration to call a service 
@@ -26,10 +28,19 @@ public class ETEmployeeServiceClient {
     @Autowired
     private RestTemplate restTemplate;
     
-    public void getEmployee() throws RestClientException, IOException {
+    @HystrixCommand(fallbackMethod = "onErrorFallback", commandKey = "employee-service/employee")
+    public String getEmployee() throws RestClientException, IOException {
         Employee employee = restTemplate.getForObject("http://employee-service/employee", Employee.class);
         
+        String employeeString = employee.toString();
         logger.info("Employee from RestTemplate: ");
-        logger.info(employee.toString());
+        logger.info(employeeString);
+        
+        return employeeString;
+    }
+    
+    @SuppressWarnings("unused")
+    private String onErrorFallback() {
+        return "Returning some employee from a local cache. This is eventual consistency in action!";        
     }
 }

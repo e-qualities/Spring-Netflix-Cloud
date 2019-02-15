@@ -41,6 +41,12 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-actuator</artifactId>
     </dependency>
+    
+    <!-- Required to enable hystrix / circuit breaking -->
+    <dependency>
+      <groupId>org.springframework.cloud</groupId>
+      <artifactId>spring-cloud-starter-netflix-hystrix</artifactId>
+    </dependency>
 
     <!-- For use of Feign client for HTTP / REST requests. -->
     <dependency>

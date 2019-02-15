@@ -21,6 +21,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.netflix.appinfo.InstanceInfo;
 import com.netflix.discovery.EurekaClient;
+import com.netflix.hystrix.contrib.javanica.annotation.HystrixCommand;
 
 public class DCEmployeeServiceClient {
 
@@ -32,7 +33,8 @@ public class DCEmployeeServiceClient {
     @Autowired
     private EurekaClient eurekaClient;
     
-    public void getEmployee() throws RestClientException, IOException {
+    @HystrixCommand(fallbackMethod = "onErrorFallback", commandKey = "employee-service/employee")
+    public String getEmployee() throws RestClientException, IOException {
         
         String baseUrlFromEurekaClient = getServiceURLwithEurekaClient();
         String baseUrlFromSpringDiscoveryClient = getServiceURLwithSpringDiscoveryClient();
@@ -53,7 +55,11 @@ public class DCEmployeeServiceClient {
         } catch (Exception ex) {
             logger.error("Caught exception during RestTemplate call. ", ex);
         }
-        logger.info(response.getBody());
+        
+        String responseBody = response.getBody();
+        logger.info(responseBody);
+        
+        return responseBody;
     }
 
     private static HttpEntity<?> getHeaders() throws IOException {
@@ -118,5 +124,10 @@ private String getServiceURLwithSpringDiscoveryClient() {
 
             logger.info("-------------------------------------------------------");
         }
+	}
+
+    @SuppressWarnings("unused")
+    private String onErrorFallback() {
+        return "Returning some employee from a local cache. This is eventual consistency in action!";        
     }
 }
