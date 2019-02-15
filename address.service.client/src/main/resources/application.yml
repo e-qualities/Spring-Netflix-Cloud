@@ -42,10 +42,10 @@ feign.hystrix.enabled: true
 hystrix.command.default.execution.isolation.thread.timeoutInMilliseconds: 4500
 ribbon:
   ConnectTimeout: 1000              # timeout for establishing a connection.
-  ReadTimeout: 1000                 # timeout for receiving data after connection is established.
+  ReadTimeout: 2000                 # timeout for receiving data after connection is established.
   MaxAutoRetries: 1                 # maximum number of retries ribbon will attempt in case of timeouts or errors.
-  MaxAutoRetriesNextServer: 1       # maximum number of other service instances to retry.
-  OkToRetryOnAllOperations: false    # disable retries for POST operations
+  MaxAutoRetriesNextServer: 0       # maximum number of other service instances to retry.
+  OkToRetryOnAllOperations: false   # disable retries for POST operations
   retryableStatusCodes: 404,500     # retry when receiving these response status codes. Requires Spring Retry on the classpath. 
   #eureka.enabled: false            # for testing, if you need to disable Eureka server lists for Ribbon.
   #ServerListRefreshInterval: 15000 

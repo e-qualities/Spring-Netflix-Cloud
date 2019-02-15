@@ -10,6 +10,7 @@ eureka:
   instance:
     metadata-map:
       zone: AWS-EU-FRA    # Specify the zone this service is running in. Used to match clients in the same zone first.
+      cluster: DEV        # For Turbine clustering.
   client: 
     serviceUrl:
       defaultZone: http://localhost:8761/eureka
@@ -21,29 +22,69 @@ info:
     description: "An edge router component based on Netflix Zuul."
     
 management.endpoints.web.exposure.include: "*"
+management.endpoint.health.show-details: always 
+
+hystrix.command.default.execution.isolation.thread.timeoutInMilliseconds: 6500
+ribbon:
+  ConnectTimeout: 1000              # timeout for establishing a connection.
+  ReadTimeout: 2000                 # timeout for receiving data after connection is established.
+  MaxAutoRetries: 1                 # maximum number of retries ribbon will attempt in case of timeouts or errors.
+  MaxAutoRetriesNextServer: 0       # maximum number of other service instances to retry.
+  OkToRetryOnAllOperations: false   # disable retries for POST operations
+  retryableStatusCodes: 404,500     # retry when receiving these response status codes. Requires Spring Retry on the classpath.
 
 zuul:
-  #ignoreSecurityHeaders: false   # - use in combination with Spring Security if you want security headers set by BE services.
-  #sensitiveHeaders:              # - will allow ALL headers to be forwarded by Zuul. Use this with care!
-  ignoredPatterns: /actuator/**   # don't try forwarding requests that are pointed at /actuator/**,
-                                  # since this is Zuuls own actuator endpoint.
-#  #ignoredServices: '*'          # - will not forward any requests.
+  ignoredPatterns: /actuator/**     # don't try forwarding requests that are pointed at /actuator/**, since this is Zuuls own actuator endpoint.
+  
+  groovyFiltersPath:                # This is not an official Zuul configuration. It is added by GroovyFilterPathConfig and used by GroovyFiltersInitializer.
+    - groovy/pre                    # See: https://stackoverflow.com/questions/49289584/spring-cloud-zuul-and-groovy-filters
+    - groovy/route                  # Allows reading filters in Groovy from disk and refresh them at runtime without restarting Zuul.
+    - groovy/post                   # Use this with extreme care, as with Groovy you could bring down the server, too.
+    - groovy/error                  
+
+#  decodeUrl: false                       # see: https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_request_uri_encoding
+#  ribbonIsolationStrategy: THREAD        # set the Hystrix isolation strategy 'THREAD' for all routes (see https://cloud.spring.io/spring-cloud-netflix/multi/multi_spring-cloud-ribbon.html#how-to-configure-hystrix-thread-pools)  
+#  ignoreSecurityHeaders: false           # - use in combination with Spring Security if you want security headers set by BE services.
+#  sensitiveHeaders:                      # - will allow ALL headers to be forwarded by Zuul. Use this with care!                                   
+#  ignoredServices: '*'                   # - will not forward any requests.
+#  <SimpleClassName>                      # See: https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_disable_zuul_filters
+#    <filterType>.disable: true           # List of filters: https://github.com/spring-cloud/spring-cloud-netflix/tree/master/spring-cloud-netflix-zuul/src/main/java/org/springframework/cloud/netflix/zuul/filters
+#
 #  routes:
-#    address-service:             # name of the service as found in Eureka registry
-#      path: /addresses/**        # path to map it to.
-#      #stripPrefix: false        # - will forward the path prefix to the target service
-#    employee-service:            # name of the service as found in Eureka registry
-#      path: /employees/**        # path to map it to.        
-#    legacy:                      # some legacy service
-#      path: /**                  # path to map it to. Note that this path is containing the  
-#                                 # paths above and therefore needs to be specified last as 
-#                                 # otherwise it would override the other paths.
-#      serviceId: old_address     # the name of the service as found in Eureka registry 
+#    address-service:              # name of the service as found in Eureka registry
+#      path: /addresses/**         # path to map it to.
+#      #stripPrefix: false         # - will forward the path prefix to the target service
+#    employee-service:             # name of the service as found in Eureka registry
+#      path: /employees/**         # path to map it to.
+#      #stripPrefix: false         # - will forward the path prefix to the target service        
+#    legacy:                       # some legacy service path to map it to. 
+#      path: /**                   # Note: this path is containing the paths above and therefore needs to be specified last as otherwise it would override the other paths.  
+#      serviceId: old_address      # the name of the service as found in Eureka registry 
 #    external:
 #      path: /external/**
-#      url: http://example.com/external_service          # route to an external URL. This is NOT using hystrix by default.  
-#                                                        # See: https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#netflix-zuul-reverse-proxy
-#      sensitiveHeaders: Cookie,Set-Cookie,Authorization # make sure these headers are not forwarded to the external service.
+#      url: http://example.com/external_service          # route to an external URL. This is NOT using hystrix by default. See: https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#netflix-zuul-reverse-proxy
+#      sensitiveHeaders: Cookie,Set-Cookie,Authorization # make sure these headers are not forwarded to the external service - they are probably making problems anyway, see: https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_cookies_and_sensitive_headers
+
+#################################################################################################################
+#  Strangulation Pattern - to slowly replace legacy. As a temporary solution you provide routes that forward    #
+#  old service clients to new service implementations. Once no old clients are left you can remove the tempo-   #
+#  rary routes.                                                                                                 #
+#################################################################################################################
+# See: https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_strangulation_patterns_and_local_forwards
+#zuul:
+#  routes:
+#    first:
+#      path: /first/**
+#      url: http://first.example.com
+#    second:
+#      path: /second/**
+#      url: forward:/second
+#    third:
+#      path: /third/**
+#      url: forward:/3rd
+#    legacy:
+#      path: /**
+#      url: http://legacy.example.com
 ---
 spring.profiles: cloud
 

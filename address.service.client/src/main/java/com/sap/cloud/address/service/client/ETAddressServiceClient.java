@@ -28,7 +28,7 @@ public class ETAddressServiceClient {
     @Autowired
     private RestTemplate restTemplate;
     
-    @HystrixCommand(fallbackMethod = "onErrorFallback", commandKey = "address-service/address")
+    @HystrixCommand(fallbackMethod = "onErrorFallback", commandKey = "address-service/v1/address")
     public String getAddress() throws RestClientException, IOException {
         
         /**
@@ -37,7 +37,7 @@ public class ETAddressServiceClient {
          * is loadbalanced (see {@link ClientApp#restTemplate()}) and uses Ribbon (which 
          * integrates with Eureka).
          */
-        Address address = restTemplate.getForObject("http://address-service/address", Address.class); 
+        Address address = restTemplate.getForObject("http://address-service/v1/address", Address.class); 
         
         String addressString = address.toString();
         logger.info("Address from RestTemplate: ");

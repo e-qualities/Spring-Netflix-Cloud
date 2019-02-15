@@ -33,7 +33,7 @@ public class FailingAddressServiceClient {
     @Qualifier("failingAddressServiceClientRestTemplate")
     private RestTemplate restTemplate;
     
-    @HystrixCommand(fallbackMethod = "onErrorFallback", commandKey = "address-service/failing-address")
+    @HystrixCommand(fallbackMethod = "onErrorFallback", commandKey = "address-service/v1/failing-address")
     public String getAddress() throws RestClientException, IOException {
         
         /**
@@ -42,7 +42,7 @@ public class FailingAddressServiceClient {
          * is loadbalanced (see {@link ClientApp#restTemplate()}) and uses Ribbon (which 
          * integrates with Eureka).
          */
-        Address address = restTemplate.getForObject("http://address-service/failing-address", Address.class); 
+        Address address = restTemplate.getForObject("http://address-service/v1/failing-address", Address.class); 
         
         // Note: this should never be called. Instead the fallback should eventually be executed.
         String addressString = address.toString();

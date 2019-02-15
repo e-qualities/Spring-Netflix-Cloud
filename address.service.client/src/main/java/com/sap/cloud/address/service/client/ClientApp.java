@@ -9,14 +9,12 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.cloud.client.circuitbreaker.EnableCircuitBreaker;
 import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
 import org.springframework.cloud.client.loadbalancer.LoadBalanced;
-import org.springframework.cloud.client.loadbalancer.LoadBalancerRequestTransformer;
 import org.springframework.cloud.openfeign.EnableFeignClients;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
-import com.sap.cloud.address.service.client.cf.CFLoadBalancerRequestTransformer;
 import com.sap.cloud.address.service.client.feignhystrix.HystrixAddressServiceProxy;
 import com.sap.cloud.address.service.client.feignhystrix.HystrixAddressServiceProxyWithException;
 
@@ -66,10 +64,5 @@ public class ClientApp {
     @Bean
     public RestTemplate restTemplate() {
         return new RestTemplate();
-    }
-    
-    @Bean
-    public LoadBalancerRequestTransformer customRequestTransformer() {
-        return new CFLoadBalancerRequestTransformer();
     }
 }

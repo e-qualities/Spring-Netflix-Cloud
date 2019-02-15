@@ -72,9 +72,4 @@ public class RetryTestApp {
     public RestTemplate failingAddressServiceClientRestTemplate() {
         return new RestTemplate();
     }
-    
-    @Bean
-    public LoadBalancerRequestTransformer customRequestTransformer() {
-        return new CFLoadBalancerRequestTransformer();
-    }
 }

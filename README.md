@@ -96,6 +96,21 @@ Table of Contents
          * [Adding the Load Balancing Request Interceptor](#adding-the-load-balancing-request-interceptor)
       * [Trying It Out](#trying-it-out)
       * [Summary](#summary)
+   * [Canary Testing with Zuul](#canary-testing-with-zuul)
+      * [Understanding Zuul Filters](#understanding-zuul-filters)
+         * [Default Filters](#default-filters)
+      * [Dynamic Filters with Groovy](#dynamic-filters-with-groovy)
+         * [How Netflix Use(d) Groovy Filters](#how-netflix-used-groovy-filters)
+      * [Simple Sample Filter Implementations](#simple-sample-filter-implementations)
+      * [Creating Zuul Route Programmatically](#creating-zuul-route-programmatically)
+      * [Case Study: A Canary Testing Filter with Zuul and Ribbon](#case-study-a-canary-testing-filter-with-zuul-and-ribbon)
+         * [Conceptual Background](#conceptual-background)
+         * [Implementation](#implementation)
+            * [A New address.service Version](#a-new-addressservice-version)
+            * [Canary Testing Zuul Filter](#canary-testing-zuul-filter)
+            * [Ribbon Canary Testing Rule](#ribbon-canary-testing-rule)
+         * [Trying It Out](#trying-it-out-1)
+      * [Summary](#summary-1)
    * [What's Next?](#whats-next)
    * [References](#references)
 
@@ -1015,6 +1030,8 @@ To integrate hystrix in your project you need to do the following steps:
 We show this in the [`address.service`](./address.service) and [`address.service.client`](./address.service.client) projects as desribed below.
 
 ### Address Service Changes
+
+❗️**Note:** In this branch we have disabled the changes described below. This will make testing Hystrix very difficult. If you want to test and understand Hystrix read this section on the [`master-with-zuul-hystrix`](https://github.com/e-qualities/Spring-Netflix-Cloud/tree/master-with-zuul-hystrix)-branch ❗️
 
 To show Hystrix in action, we need a failing service. Therefore, we have modified the [`RESTEndpoint`](./address.service/src/main/java/com/sap/cloud/address/service/RESTEndpoint) class of `address.service` slightly to now fail randomly using the following block:
 
@@ -2093,16 +2110,576 @@ We do this, since on Cloud Foundry all service instances will have the same rout
 Note that this configuration does not turn off Ribbon's load balancing rules - in fact, there may still be a service instance selection process in place. 
 This process, however, will be used for a different purpose than load balancing, and rather focus on doing service-level routing and realizing cloud-native qualities like zero-downtime and phased client migrations.
 
-# What's Next?
+# Canary Testing with Zuul
 
-Next, we will look into how ...
-* Ribbon is used in combination with Zuul
-* Zuul can be configured to
-  * support in canary testing (using Ribbon rules)
-  * blue-green deployments
-  * zero downtime
+We have had a look at Zuul before in branch [master-with-zuul](https://github.com/e-qualities/Spring-Netflix-Cloud/tree/master-with-zuul). In this chapter we will take a deeper look into Zuul and its capabilities.
+We will investigate how Zuul can intercept and process requests and how it can pass on information contained in the requests down to the load balancing layer where Ribbon excels.  
+In combination, this is a powerful way of dynamically routing requests and selecting service instances. This can be used for canary tests, blue-green deployments and significantly reduce downtimes, leading to true zero-downtime deployments.
+
+## Understanding Zuul Filters
+
+[Zuul](https://github.com/Netflix/zuul/wiki/How-it-Works) acts an API gateway and proxy server and uses Ribbon load balancer to *detect* server instances to route (from Eureka) to and *select* instances to send requests to.
+
+Zuul is provided "wrapped" by Spring Cloud and is implemented using `Servlet`s - two to be precise.  
+First, there is the Spring `DispatcherServlet` which is generally used by **Spring WebMVC** for writing modular Web applications. Generally, all requests go to the `DispatcherServlet` and from where they are dispatched to the respective request processors.  
+For requests that contain large amounts of upload data, the `DispatcherServlet` would be a bottleneck and hence, another Servlet is provided which is available by the `/zuul/*` endpoint. More info can be found [here](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_uploading_files_through_zuul).
+
+To process requests you can create **filters**. These can be coded in Java, or in a scripting language like Groovy (see below).  
+Filters can be grouped as follows:
+
+* [`PRE`](https://github.com/spring-cloud/spring-cloud-netflix/blob/master/spring-cloud-netflix-zuul/src/main/java/org/springframework/cloud/netflix/zuul/filters/support/FilterConstants.java#L160) Filters execute before routing to the origin. Examples include request authentication, choosing origin servers, and logging debug info.
+* [`ROUTE`](https://github.com/spring-cloud/spring-cloud-netflix/blob/master/spring-cloud-netflix-zuul/src/main/java/org/springframework/cloud/netflix/zuul/filters/support/FilterConstants.java#L165) Filters handle routing the request to an origin. This is where the origin HTTP request is built and sent using Apache HttpClient or Netflix Ribbon.
+* [`POST`](https://github.com/spring-cloud/spring-cloud-netflix/blob/master/spring-cloud-netflix-zuul/src/main/java/org/springframework/cloud/netflix/zuul/filters/support/FilterConstants.java#L155) Filters execute after the request has been routed to the origin. Examples include adding standard HTTP headers to the response, gathering statistics and metrics, and streaming the response from the origin to the client.
+* [`ERROR`](https://github.com/spring-cloud/spring-cloud-netflix/blob/master/spring-cloud-netflix-zuul/src/main/java/org/springframework/cloud/netflix/zuul/filters/support/FilterConstants.java#L150) Filters execute when an error occurs during one of the other phases.
+  
+Zuul also allows the creation of custom filter types that can be executed explicitly. For example, Netflix use a custom `STATIC` type that generates a response within Zuul instead of forwarding the request to an origin service instance. 
+
+Zuul's primary request lifecycle consists of `PRE`, `ROUTE`, and `POST` phases, in that order. All filters with these types are run for every request. Any other type of filters (e.g. `STATIC` ones) can be executed explicitly using [`FilterProcessor.runFilters(String type)`](http://netflix.github.io/zuul/javadoc/zuul-core/com/netflix/zuul/FilterProcessor.html#runFilters(java.lang.String)) - you would call it from a `PRE`, `ROUTE` or `POST` filter.
+
+### Default Filters
+
+Spring Cloud Netflix Zuul comes with two distinct filter chains, depending on whether you are using the `@EnableZuulServer` or the `@EnableZuulProxy` annotation in your Spring Boot application. The active filters are described [here for `@EnableZuulServer`](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#zuul-developer-guide-enable-filters) and [here for `@EnableZuulProxy`](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_enablezuulproxy_filters).  
+You can find the source code of all of these filters [here](https://github.com/spring-cloud/spring-cloud-netflix/tree/master/spring-cloud-netflix-zuul/src/main/java/org/springframework/cloud/netflix/zuul/filters).
+
+More information on writing filters can be found from [Netflix](https://github.com/Netflix/zuul/wiki/Writing-Filters) and [Spring Cloud](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_custom_zuul_filter_examples).  
+
+## Dynamic Filters with Groovy
+
+Netflix Zuul supports filters written in Groovy. This allows them to dynamically, i.e. at runtime, upload new filter implementations that will automatically be applied without having to restart the Zuul server(s). Using Spring Cloud Netflix Zuul, this feature is rather hidden, and needs to be explicitly added. Here we show how this is done, based on this excellent [post](https://stackoverflow.com/questions/49289584/spring-cloud-zuul-and-groovy-filters).
+
+To (re-)enable Groovy-based Zuul filters, you need to declare two beans which we provide in this repository:
+1. [`GroovyFilterPathConfig`](./zuul.service/src/main/java/com/sap/cloud/zuul/service/filters/groovy/GroovyFilterPathConfig.java)
+1. [`GroovyFiltersInitializer`](./zuul.service/src/main/java/com/sap/cloud/zuul/service/filters/groovy/GroovyFiltersInitializer.java)
+
+`GroovyFilterPathConfig` is a simple bean using Spring `ConfigurationProperties` to read custom configurations from `application.yml`:
+```java
+@Component
+@Profile("!cloud") // For now, only use this for local deployments. Not for the cloud.
+@EnableConfigurationProperties
+@ConfigurationProperties(prefix = "zuul")
+public class GroovyFilterPathConfig {
+
+    private List<String> groovyFiltersPath;
+
+    public List<String> getGroovyFiltersPath() {
+        return groovyFiltersPath;
+    }
+
+    public void setGroovyFiltersPath(List<String> groovyFiltersPath) {
+        this.groovyFiltersPath = groovyFiltersPath;
+    }
+}
+```
+
+This will allow you to add configurations to `application.yml` to configure paths on the file system where Zuul will look for groovy filters, like so:
+
+```yaml
+zuul:
+  groovyFiltersPath:                # This is not an official Zuul configuration. It is added by GroovyFilterPathConfig and used by GroovyFiltersInitializer.
+    - groovy/pre                    # See: https://stackoverflow.com/questions/49289584/spring-cloud-zuul-and-groovy-filters
+    - groovy/route                  # Allows reading filters in Groovy from disk and refresh them at runtime without restarting Zuul.
+    - groovy/post                   # Use this with extreme care, as with Groovy you could bring down the server, too.
+    - groovy/error                  
+```
+Here, four directories are declared that will be periodically search for Groovy-based filters. This configuration information is made available by `GroovyFilterPathConfig` using the `getGroovyFiltersPath()` method. And since `GroovyFilterPathConfig` is declared as a bean, it can be injected into other beans.
+
+`GroovyFiltersInitializer` is a bean that uses an instance of `GroovyFilterPathConfig` and provides the mechanism to periodically poll the file system at the configured paths looking for Groovy-based filters and to instantiate classes at runtime from them that will be executed as part of the Zuul filter chain:
+
+```java
+@Component
+@Profile("!cloud") // For now, only use this for local deployments. Not for the cloud.
+public class GroovyFiltersInitializer {
+
+    private Logger logger = LoggerFactory.getLogger(GroovyFiltersInitializer.class);
+
+    @Autowired
+    private GroovyFilterPathConfig config;
+
+    @PostConstruct
+    private void initGroovyFilters() throws Exception {
+
+        List<String> groovyFiltersPath = config.getGroovyFiltersPath();
+
+        if(groovyFiltersPath == null || groovyFiltersPath.size() == 0) {
+            return;
+        }
+
+        FilterLoader.getInstance().setCompiler(new GroovyCompiler());
+        FilterFileManager.setFilenameFilter(new GroovyFileFilter());
+
+        String[] filterDirectoryList = groovyFiltersPath.toArray(new String[0]);
+        
+        FilterFileManager.init(5, filterDirectoryList);       
+        logger.info("Groovy Filter file manager started");
+    }
+}
+```
+
+This instantiates Netflix' `FilterLoader` and `FilterFileManager` - the loader taking over the part of class-loading Groovy filters and the file manager taking care of the file system polling. Note that the refresh / polling interval is given in `FilterFileManager.init(5, filterDirectoryList)`.
+
+With these two beans declared, you can now dump new Groovy filters (even at runtime) into the folders configured in `application.yml`. They will be picked up, instantiated and take part in the request filter chain without restarting Zuul. All you need to add additionally to your `pom.xml` is the following Groovy language dependency:
+
+```xml
+<dependency>                            
+    <groupId>org.codehaus.groovy</groupId>
+    <artifactId>groovy-all</artifactId>   
+    <version>2.4.9</version>              
+</dependency>
+```
+
+Note, that we have added an `@Profile` annotation to both beans to disable them, if we deploy Zuul to the Cloud. You can remove that annotation, of course.
+
+To locally try out this feature, simply proceed as follows:
+
+1. Start `eureka.service`
+1. Start `address.service`
+1. Start `address.service.client` 
+1. Start `zuul.service`
+1. Open your browser and enter the following URL `http://localhost:8888/address-service-client/call-address-service`.
+
+This will fire a request at Zuul which will be forwarded to `address.service.client`'s `/call-address-service` endpoint.
+If this succeeds, you will see output in the command line of Zuul like this:
+
+```
+-- Groovy Baby! LoggingFilter: This is a message from Groovy.
+-- Groovy Baby! LoggingFilter: Request URI was: /address-service-client/call-address-service
+```
+
+This output is generated from `LoggingFilter.groovy` located locally in folder `groovy/pre`.
+You can change that file on the fly and see the log output update, when you (re-)send the request.
+
+### How Netflix Use(d) Groovy Filters
+
+Now that we have seen how Groovy filters can be used to dynamically update Zuul's behavior at runtime, it is interesting to see, [how Netflix use(d) it](https://github.com/Netflix/zuul/wiki/zuul-netflix-webapp#filter-storage).
+
+Netflix do not just deploy one Zuul instance, of course, but a whole set of clusters. Instances of the cluster should all behave the same, and hence updating one Zuul instance with a new dynamic Groovy filter means the other instances also need to be updated.
+
+Netflix solution to this is to use a central configuration storage. Netflix used [Apache Cassandra](http://cassandra.apache.org/), but you could use Archaius, Spring Cloud Config or any other central configuration management and distribution technology as well.
+
+Netflix stored their Groovy filters in the central configuration store. Inside Zuul they additionally deployed a configuration client that would periodically poll the configuration store for new, updated or removed Groovy filters. It would then fetch these new filters, place them on the local file system of the Zuul instance (or remove it from there in case it was deleted centrally). From the file system, the `FilterManager` we have described above would then pick up the new / changed filters and (re-)load them into memory.
+
+Since this kind of logic was deployed with all Zuul instances, a central change to a Groovy filter would rather immediately be reflected in the whole Zuul cluster. You can find more information and Netflix' code [here](https://github.com/Netflix/zuul/wiki/zuul-netflix-webapp#filter-storage).
+
+Hybris Revenue Cloud use a similar approach, storing routing configuration centrally and applying them at each router instance.
+
+## Simple Sample Filter Implementations
+
+In this repository, you can find a set of sample filters in package `com.sap.cloud.zuul.service.filters`.
+You will find there implementations `ApacheHttpRoutingFilter` and `OkHttpRoutingFilter` that proxy to an origin server. For an implementation that shows how to log Zuul routing information have a look at [`RouteLoggingZuulFilter`](https://github.com/spring-cloud/spring-cloud-netflix/blob/master/spring-cloud-netflix-zuul/src/main/java/org/springframework/cloud/netflix/zuul/filters/RouteLoggingZuulFilter.java).
+
+Furthermore, you can find sample implementations of custom `PRE`, `ROUTE`, `POST` and `ERROR` filters in the respective sub packages of `package com.sap.cloud.zuul.service.filters.samples`.
+
+All filters are declared as Spring beans in `ZuulBeanConfigurations`. Custom Ribbon rules are declared in `RibbonCustomConfigurations`.
+
+## Creating Zuul Route Programmatically
+
+Usually, Zuul's routes are configured in `application.yml` and at design-time. There is, however, a way to dynamically create routes in Zuul. 
+
+We have implemented a show case in class [`AddDynamicRoutesService`](./zuul.service/src/main/java/com/sap/cloud/zuul/service/AddDynamicRoutesService.java) in the `zuul.service` project.  
+This class presents a REST endpoint to send route information to Zuul that will be reflected in a dynamically created route.
+
+## Case Study: A Canary Testing Filter with Zuul and Ribbon
+
+Canary testing is (or at least should be) used to gradually roll out new versions of a service without negatively impacting a service's user base.
+
+Consider the following scenario: 
+1. Suppose you have an `address.service` of version 1.0.0 - this service is running in production and there are 50.000 clients using the service on a frequent basis.
+2. You spot a bug in `address.service` or you simply want to add a new feature - hence you need to change the service and will want to roll out a new version, version 2.0.0.
+3. You have tested version 2.0.0 of `address.service` but you cannot be 100% sure that your new service will be 100% stable.
+4. You do not want to have your user base impacted by a downtime, when they are migrated to version 2.0.0 of your service.
+
+Since you cannot be totally sure (even though you have done your due testing diligence) that version 2.0.0 will be 100% stable, you don't want to switch your entire user base from version 1.0.0 to version 2.0.0 in one "big-bang" move.  
+What you are rather looking for is a means to "migrate" only a fraction of your users - we call them canary users - to the new service version, while keeping the majority of your user base on the version 1.0.0 for now.  
+This will allow you to see how version 2.0.0 behaves under load and if it should prove unstable, only a fraction of your user base will actually be impacted by it.
+
+That is what canary testing is basically about, and there are [excellent articles](https://martinfowler.com/bliki/CanaryRelease.html) that describe this in further detail.
+
+In this repository branch, we have implemented a Zuul filter and a custom Ribbon load balancer rule, that shows how canary testing can be realized. All canary testing classes can be found in package `com.sap.cloud.zuul.service.filters.canaryrouting`.
+
+In the following sections we will walk you through the details.
+
+### Conceptual Background 
+
+The figure below shows a conceptual overview of the components involved and how canary testing is realised.
+We have created a version 2.0.0 implementation of `address.service` which we refer to as `address.version.v2`.
+
+![Canary Testing](.documentation/canary-testing.png)
+
+1. Zuul acts as a proxy / router combination, that allows a client to communicate with a service. However, rather than addressing a service directly by its (internal) URI, a client contacts Zuul and specifies a *service alias* in form of a route.  
+   A typical request looks like `http://zuul.service:8888/address-service/v1/address`, where `address-service` is an alias name (e.g. the service ID in Eureka) of the `address.service`. The remainder of the URL (`/v1/address`) is simply the endpoint of the service instance that Zuul will proxy the request to.
+2. When Zuul receives the request, it checks its route configurations, searching for the service alias name. If nothing is explicitly configured (i.e. in case of dynamic routes being created from the Eureka service instance IDs), the service alias is passed to Ribbon for load balancing.
+3. Ribbon tightly integrates with Eureka, and hence will use the service alias (i.e. `address-service`) for a lookup of service instances from Eureka.
+4. Once Ribbon has retrieved the list of service instances from Eureka, its load balancer will consult the load balancing rule - whose job essentially is to select the (single) `Server` instance that the load balancing request should be sent to.
+
+In other words, a load balancing rule is used to filter the list of possible service instances registered with Eureka down to the one instance that a request should be forwarded to.
+
+For canary testing, we make use of this mechanism in the following way:
+
+1. We make sure that both `address.service` and `address.service.v2` (i.e. both versions) register to Eureka by the same service alias, i.e. `address-service`.  
+   We do so, because essentially for an external client, both are the same. Clients should not be concerned with internal versioning.  
+   By doing so, Eureka allows us to create an abstraction layer for a service client - a union of all service versions into one logical address service. 
+1. With the abstraction layer in place, internally, we can now freely route requests between the two versions using a load balancing rule without clients noticing.
+1. The only thing we need, is a discriminator - i.e. a condition the load balancing rule will be able to distinguish the two service versions with, and will base its decision on.  
+1. Eureka service registry allows us to specify service instance metadata. And we can use this mechanism to define the discriminator we need.    
+   We do this by adding a `canary: true` property to instances of `address.service.v2`. This basically marks these instances as being "not fully production ready" yet, but available for a few brave clients to test.
+
+With these ideas motivated, the way `RibbonCanaryRule` functions is rather straight forward:
+
+1. Check if an incoming Zuul request is eligible for canary testing - usually, this is a random decision, balancing 5% of requests to canary (v2.0.0) service instances and the remaining 95% to the current production (v1.0.0) version.
+1. If a request for `address-service` is eligible for canary testing, select only those service instances of `address-service` that have the `canary` flag set in their metadata.
+1. Forward the request to one of these instances (e.g. in a round-robin fashion).
+1. If a request is not eligible for canary testing, select only those instances of `address-service` that do **NOT** have the `canary` flag set.
+1. Forward the request to one of these instances (e.g. in a round robin fashion). 
+1. Make sure that if a request has been forwarded to a canary service, all subsequent requests are also forwarded there. The same should be true for those who have not been selected for canary testing.  
+   Usually, this form of "session stickiness" is achieved by setting a client cookie. 
+
+❗️**Note:** By doing the above, we can not only realise canary testing. We can also achieve zero-downtime service updates and client migration!
+
+### Implementation
+
+#### A New `address.service` Version
+
+To simulate canary testing, we need a new version of `address.service`. Usually, you would change the code of `address.service` test, build and check in the code and then tag it with a new release version before deploying it to your production landscape.
+To show and maintain the different `address.service` versions more easily, we have created a copy of `address.service` named `address.service.v2`. In that copy, we made the changes that you would normally do on `address.service` directly.  
+It also allows us to deploy both versions side-by-side as two different (Cloud Foundry) applications.
+
+The major difference between `address.service` and `address.service.v2` is that we are returning a slightly changed address from `RESTEndpoint` of `address.service.v2`:
+```java
+@RequestMapping(value = "/v1/address", method = RequestMethod.GET)
+    public Address firstPage() throws Exception {
+        
+        final String VERSION_SUFFIX = "_VERSION_2.0_API_1.0";
+        
+        Address address = new Address();
+        address.setCity("Heidelberg"                + VERSION_SUFFIX);
+        address.setCountry("Germany"                + VERSION_SUFFIX);
+        address.setHouseNumber("10a"                + VERSION_SUFFIX);
+        address.setPostalCode("69126"               + VERSION_SUFFIX);
+        address.setStreetName("Franz-Liszt-Strasse" + VERSION_SUFFIX);
+
+        return address;
+    }
+```
+Note the version suffix that we add to all address properties - this will allow us to quickly identify which service version a client asking for an address is connected to.
+
+Note also, that we have slightly changed the address of the REST endpoint - this is something we have done both in `address.service` and `address.service.v2`.  
+Both services now expose an address by the endpoint `/v1/address` - where `/v1` indicates the version of the *API* **not** the service.  
+
+That is an **important thing to understand** - because canary testing does not cover migration from one *API version* to another, but from one *service version* to another.  
+
+Migrating from one API version to another will always incur code changes in the service clients - after all they are using new API features and need to code business logic that makes use of them.  
+Mirgrating clients from one *service* version to another, however, should **not** incur client code changes, since new versions of a service are supposed to be backwards-compatible with previous versions.
+
+In other words, `address.service.v2` still needs to provide the same APIs that version 1.0.0 provided, in order to be backwards compatible. It might add to APIs of version 1.0.0, but it **must not** remove any of them.
+Addition may happend by providing more functionality (e.g. `/v1/prettyPrintedAddress`) or entirely new endpoints.
+
+For example, `address.service.v2` might provide a totally new API under the endpoint `/v2/address` (note the `/v2` prefix!). That endpoint might return an address that follows a totally different format (e.g. `XML` instead of `JSON`), which would be incompatible to what is returned by `/v1/address`.  
+Note, that a new version of a service **must also not** change the *behaviour* of its predecessor's API, since might also be an incompatible change.
+
+Finally, there is a change we made to `address.service.v2`'s `application.yml`:
+
+```yaml
+eureka:
+  instance:
+    metadata-map:
+      canary: true            # Enable this service for canary testing. If this property is not present the service is deemed to be a production service. 
+      version: 2.0.0          # Version 2.0.0 of the address service.
+```
+
+Not only did we change the `version` information in the service instance metadata, we also introduced a new `canary` flag, which we use in the Ribbon load balancing rule implementing canary testing.
+
+#### Canary Testing Zuul Filter
+
+`RibbonCanaryFilter` is the Zuul filter class that is the entry point to canary testing. It is declared as a Spring bean in `ZuulBeanConfigurations` and implements a `PRE`-phase HTTP request interceptor.
+
+```java
+public class RibbonCanaryFilter extends ZuulFilter {
+    ...
+    @Override
+    public Object run() throws ZuulException {
+        System.out.println("-- Calling RibbonCanaryFilter --");
+
+        RequestContext context = RequestContext.getCurrentContext();
+        HttpServletRequest request = context.getRequest();
+        final RibbonCanaryContext ribbonContext = new RibbonCanaryContext(request);
+        
+        //pass the ribbonContext down to the Ribbon layer.
+        RequestContext.getCurrentContext().set(FilterConstants.LOAD_BALANCER_KEY, ribbonContext); 
+        return null;
+    }
+    ...
+}
+```
+In the `run()`-method, the filter gets the the current HTTP request from Zuul's `RequestContext`. Since that request will be required by the Ribbon load balancing layer, it wraps the request in a `RibbonCanaryContext` object.
+That object is simply a DTO to transfer information from the Zuul filter layer to the Ribbon layer. 
+
+The filter then sets the `RibbonCanaryContext` object inside the `RequestContext` of Zuul by the name of `FilterConstants.LOAD_BALANCER_KEY`. This name is important, as it indicates to the Zuul filter runtime, that the object value is intended for the underlying load balancer. The Zuul runtime will make sure that the `ribbonContext` object will be passed in Ribbon.
+
+#### Ribbon Canary Testing Rule
+
+`RibbonCanaryRule` is a custom load balancer rule implementing Ribbon's `IRule` interface - and it is where the real magic is happening.
+Before we dive into the implementation, let's quickly recap, what a load balancer rule does.
+
+`RibbonCanaryRule`'s implementation is given below:
+
+```java
+public class RibbonCanaryRule extends ZoneAvoidanceRule {
+    
+    private static final String SESSION_KEY_CANARY_USER_FLAG = "com.sap.cloud.isCanaryUser";
+    private CompositePredicate compositePredicate; 
+    
+    @Override
+    public Server choose(Object key) {
+        System.out.println("-- Ribbon Canary Rule being executed.");
+        System.out.println("-- Ribbon Context handed in from Zuul layer: " + key);
+        
+        final RibbonCanaryContext ribbonContext = (RibbonCanaryContext) key;
+        final HttpServletRequest request = ribbonContext.getRequest();
+        
+        Server selectedServer = null;
+        
+        // Check if request is part of any session (canary or production).
+        // If so, make sure it gets routed to wherever its predecessors 
+        // were routed to. This implements session stickiness.
+        
+        if(isPartOfCanarySession(request)) {
+            // Check if the current client HTTP request
+            // is part of a session with the canary service.
+            // If so, directly forward it to the canary service.
+
+            System.err.println("Incoming request is part of a canary session. Routing to canary (v2.0.0) service instance(s).");
+            return chooseCanaryServer(ribbonContext, request);
+        }
+        else if (isPartOfProductionSession(request)) {
+            // Check if the current client HTTP request
+            // is part of a session with the production service.
+            // If so, directly forward it to the production service.
+
+            System.err.println("Incoming request is part of a PRODUCTION session. Routing to canary (v1.0.0) service instance(s).");
+            return chooseProductionServer(ribbonContext, request);
+        }
+        
+        // If we end up here, the incoming request is not part of any session
+        // and needs to be selected randomly for either canary testing or production usage.
+        
+        // In 5% of all cases we will pick a canary service instance for routing
+        // requests to. For the remaining 95% percent we will route to the current production 
+        // version of the service. 
+        // If a canary server is selected, the client will receive a session
+        // cookie that indicates that the request was routed to a canary service instance.
+        // This is to make sure that subsequent requests belonging to the same session are
+        // again routed to the canary service version and not re-entered in the random selection pool. 
+        // Note, that subsequent requests are not necessarily routed to the same canary instance though! 
+        // They are solely routed to a canary service instance and service instances are supposed to be stateless!
+        
+        if(Math.random() <= 0.05) {
+            System.err.println("Incoming request has been selected for canary testing. Routing to canary (v2.0.0) service instance(s).");
+            selectedServer = chooseCanaryServer(ribbonContext, request);
+        }
+        else {
+            System.err.println("Routing request to current production (v1.0.0) service instance(s).");
+            selectedServer = chooseProductionServer(ribbonContext, request);                
+        }
+        
+        return selectedServer;
+    }
+    
+    private boolean isPartOfCanarySession(HttpServletRequest request) {
+        Boolean isCanaryUser = (Boolean) request.getSession().getAttribute(SESSION_KEY_CANARY_USER_FLAG);
+        return isCanaryUser != null && isCanaryUser.equals(true);   
+    }
+    
+    private boolean isPartOfProductionSession(HttpServletRequest request) {
+        Boolean isCanaryUser = (Boolean) request.getSession().getAttribute(SESSION_KEY_CANARY_USER_FLAG);
+        return isCanaryUser == null || Boolean.FALSE.equals(isCanaryUser);   
+    } 
+
+    private Server chooseCanaryServer(final RibbonCanaryContext ribbonContext, final HttpServletRequest request) {
+        
+        AbstractServerPredicate superClassRulePredicates = super.getPredicate();
+        CanaryServerSelectionPredicate canaryServerSelectionPredicate = new CanaryServerSelectionPredicate(this);
+        
+        compositePredicate = CompositePredicate.withPredicates(superClassRulePredicates, canaryServerSelectionPredicate)
+                             .addFallbackPredicate(AbstractServerPredicate.alwaysTrue()) // Add a fallback predicate which will be used if the previous ones yielded too few service instances.
+                             .build();                                                   // Note, that this can lead to a service instance selected that is not a canary instance due to the fact that 
+                                                                                         // there are no canary instances currently available.
+        
+        // trigger the superclass server selection mechanism. This will call
+        // this class's getPredicate() method, which will return the compositePredicate
+        // created of the superclass selection predicates and the canaryServerSelectionPredicate.
+        // This way, we inherit the selection logic of the super class and append the one we
+        // defined here for canary routing.
+        Server selectedServer = super.choose(ribbonContext);
+        
+        // set the cookie that indicates that subsequent requests should be routed to canary servers as well.
+        // will only be set, if the selected server is not null.
+        // this implements session stickiness for for requests to canary servers.
+        setCanaryCookie(request, selectedServer);
+        
+        return selectedServer;
+    }
+
+    private void setCanaryCookie(final HttpServletRequest request, Server selectedServer) {
+        
+        if (selectedServer == null) {
+            System.err.println("Warning! Selected Server instance for canary testing is null. Not setting any canary session cookie.");
+            return;
+        }
+        
+        if (!CanaryServerSelectionPredicate.isCanaryServer(selectedServer) ) {
+            System.err.println("Warning! Selected Server instance for canary testing is not actually a canary instance. This must be a fallback to a production server. Not setting any canary session cookie.");
+            return;
+        }
+
+        boolean createIfNotExisting = true;
+        request.getSession(createIfNotExisting).setAttribute(SESSION_KEY_CANARY_USER_FLAG, true);
+        System.err.println("Setting CANARY attribute in request session to TRUE.");
+    } 
+    
+    private Server chooseProductionServer(RibbonCanaryContext ribbonContext, HttpServletRequest request) {
+        AbstractServerPredicate superClassRulePredicates = super.getPredicate();
+               
+        ProductionServerSelectionPredicate productionServerSelectionPredicate = new ProductionServerSelectionPredicate(this);
+        compositePredicate = CompositePredicate.withPredicates(superClassRulePredicates, productionServerSelectionPredicate).build();
+        
+        // trigger the superclass server selection mechanism. This will call
+        // this class's getPredicate() method, which will return the compositePredicate
+        // created of the superclass selection predicates and the productionServerSelectionPredicate.
+        // This way, we inherit the selection logic of the super class and append the one we
+        // defined here for routing to production version service instances only.
+        Server selectedServer = super.choose(ribbonContext);
+        
+        // set the cookie that indicates that subsequent requests should be routed to production servers as well.
+        // will only be set, if the selected server is not null (which should never be the case).
+        // this implements session stickiness for for requests to production servers as well. 
+        setProductionCookie(request, selectedServer);
+        
+        return selectedServer;
+    }
+    
+    private void setProductionCookie(final HttpServletRequest request, Server selectedServer) {
+        
+        if (selectedServer == null) {
+            System.err.println("Warning! Selected Server instance for production testing is null. Not setting any production session cookie.");
+            return;
+        }
+        
+        if (!ProductionServerSelectionPredicate.isProductionServer(selectedServer) ) {
+            System.err.println("Warning! Selected Server instance is not actually a production instance! This is most likely a BUG. Not setting any canary session cookie.");
+            return;
+        }
+
+        boolean createIfNotExisting = true;
+        request.getSession(createIfNotExisting).setAttribute(SESSION_KEY_CANARY_USER_FLAG, false);
+        System.err.println("Setting CANARY attribute in request session to FALSE.");
+    } 
+    
+    @Override
+    public AbstractServerPredicate getPredicate() {
+        if (compositePredicate != null) {
+            return compositePredicate;
+        }
+        
+        System.out.println("-- WARNING! getPredicate() called but composite predicate not defined. Returning superclass predicates only. This effectively disables the canary testing rule.");
+        return super.getPredicate();
+    }
+}
+```
+`RibbonCanaryRule` extends `ZoneAvoidanceRule` - the standard Ribbon rule that is used by Spring Cloud Netflix, when Eureka is on the classpath. 
+
+Extension is necessary to inherit all the great load balancing features that Spring Cloud / Netflix have already defined (e.g. zone-based routing, etc.).
+`ZoneAvoidanceRule` is a `PredicateBasedRule`, i.e. it uses so-called predicates to filter the list of service instances eligible for load balancing. 
+Thus, `RibbonCanaryRule`'s implementation boils down to implementing an additional predicate that will be used to narrow down the list of service instances returned from Eureka, to only those that are either production (v1.0.0) or canary (v2.0.0) ones.  
+The additional predicate is then combined into a `CompositePredicate` with those defined in the `ZoneAvoidanceRule` superclass thus inheriting the load balancing feature from it. 
+The composite predicate is then returned in the `getPredicate()` method  which is used by the superclass algorithm to filter the service instance list returned by Eureka.
+
+The rule's main logic is implemented in the `choose(Object key)` method. This method will be called by the Ribbon load balancer and the input key parameter will be the `RibbonContext` object that the Zuul filter handed down to the Ribbon layer.
+
+The implementation is rather straight forward - first we check if the incoming client request is already part of a canary testing session. If so, we route it directly to the canary service.  
+If the client request is part of a session of requests that should be routed to production service instances, we route it there directly.  
+Only in case a request comes in that does not belong to any active session, will we send 5% of the clients to canary service instances, and 95% of them to the production version.
+
+Note, that since our goal is to send entire *clients* (rather than just *requests*) to canary instances (and keep the other 95% on our production service), we need to logically group requests from the same client together and make sure that all of them are treated the same way. If the first one was routed to a canary instance, the subsequent ones also need to go there. Likewise, the same holds true for requests that were routed to a production instance.
+
+Thus, in case we forward a client request to the canary version, we create a predicate that selects only service instances of the canary service. Then we set a session cookie, so that subsequent requests are also sent to canary instances. This basically achieves the kind of **session stickiness** we described above. 
+
+In the 95% case, we create another predicate that selects only service instances of the production service. The load balancer then forwards the request there. We again set a session cookie, so that subsequent requests are also sent to production instances. 
+
+The actual service instance selection is triggered by calling `super.choose(ribbonContext)` - this triggers the predicate-based `choose(Object key)` implementation of the superclass, which in turn will get the predicate defined in our rule, calling `getPredicate()`. That predicate (composed of ours and the superclass's) will then be used to filter the service instance list - thus applying standard Spring Cloud Netflix predicates including ours.
+
+`RibbonCanaryRule` is declared as a bean in `RibbonCustomConfigurations` and will be picked up by all Ribbon clients using Spring dependency injection.
+
+### Trying It Out
+
+❗️**Note:** `RibbonCanaryRule` implements session stickiness for both requests targeted at `canary` services as well as production ones. Hence testing can be very cumbersome.
+95% of the times, you will end up receiving an answer from a production service, and only in 5% of all requests you will end up at a canary one. What's worse: you will have to clean cookies
+in between requests otherwise you will always stick with the same service. To avoid this, (and be able to simply hit refresh many times in your browser) comment out the following lines of code in `RibbonCanaryRule.choose(Object key)`:
+
+```java 
+  ...
+  // else if (isPartOfProductionSession(request)) {
+  //     // Check if the current client HTTP request
+  //     // is part of a session with the production service.
+  //     // If so, directly forward it to the production service.
+
+  //     System.err.println("Incoming request is part of a PRODUCTION session. Routing to canary (v1.0.0) service instance(s).");
+  //     return chooseProductionServer(ribbonContext, request);
+  // }
+  ...
+```
+
+To see canary testing in action, simply proceed as follows:
+
+1. Start `eureka.service`
+2. Start `address.service`
+3. Start `address.service.v2`
+4. Start `zuul.service`
+5. Point your browser to `http://localhost:8888/address-service/v1/address` and hit refresh several times.
+
+Most of the times you will see the address returned from (version 1.0.0) `address.service` like this:
+
+```json
+{
+  postalCode: "69126",
+  city: "Heidelberg",
+  streetName: "Franz-Liszt-Strasse",
+  houseNumber: "10a",
+  country: "Germany"
+}
+```
+
+Yet, if you keep refreshing, at some point you will be internally routed to (version 2.0.0) `address.service.v2`, and hence will see an address output like this:
+
+```json
+{
+  postalCode: "69126_VERSION_2.0_API_1.0",
+  city: "Heidelberg_VERSION_2.0_API_1.0",
+  streetName: "Franz-Liszt-Strasse_VERSION_2.0_API_1.0",
+  houseNumber: "10a_VERSION_2.0_API_1.0",
+  country: "Germany_VERSION_2.0_API_1.0"
+}
+```
+Congratulations! You are officially a canary now... 🐦
+
+Note also, that while you keep refreshing you will always be routed to the canary service, in other words, for as long as the session is valid you will not be see the output of version 1.0.0 anymore.
+
+## Summary
+
+In this section we have shown how to realize canary testing, including a realization of session stickiness using Zuul, Ribbon and Eureka.
+
+This shows all the necessary concepts required for realizing things like:
+1. Zero-downtime deployments
+1. Service version strangling 
+1. Throttled migration of service clients
+1. Metadata-based routing  
+
+# What's Next?
+  * feature flags - to expose new features selectively.
+  * blue-green & zero downtime deployments
+  * service version strangling 
   * authenticate client requests
   * restrict access to services
+  
 
 # References
 * Spring Cloud Netflix
@@ -2165,3 +2742,8 @@ Next, we will look into how ...
   * [Ribbon: Unable to set default configuration using @RibbonClients(defaultConfiguration=...)](https://github.com/spring-cloud/spring-cloud-netflix/issues/374)
   * [Understanding Application Context](https://spring.io/understanding/application-context)
   * [Client Side Load Balancing with Ribbon and Spring Cloud](https://spring.io/guides/gs/client-side-load-balancing/)
+  
+* Canary Testing with Zuul
+  * [Enabling Groovy Filters in Spring Cloud Netflix Zuul](https://stackoverflow.com/questions/49289584/spring-cloud-zuul-and-groovy-filters)
+  * [Canary Testing](https://martinfowler.com/bliki/CanaryRelease.html)
+  * [Dynamic Zuul Routes](https://dzone.com/articles/persistent-and-fault-tolerant-dynamic-routes-using)

@@ -1,0 +1,75 @@
+---
+spring:
+  application:
+    name: address-service
+
+server:
+  port: ${PORT:8090}
+
+eureka:
+  client: 
+    serviceUrl:
+      defaultZone: http://localhost:8761/eureka
+  instance:
+    metadata-map:
+      canary: true            # Enable this service for canary testing. If this property is not present the service is deemed to be a production service. 
+      version: 2.0.0          # Version 2.0.0 of the address service.
+      cluster: DEV            # Required by Turbine (see turbine project's application.yml)
+      zone: AWS-EU-FRA        # Specify the zone this service is running in. Used to match clients in the same zone first.
+      events: > 
+        { 
+          [
+            {
+              "type" : "customerCreated", 
+              "registry" : "https://kafka.registry.com"
+            }, 
+            {
+              "type" : "customerDeleted", 
+              "registry" : "https://kafka.registry.com"
+            }
+          ]
+        }
+    healthcheck: 
+      enabled: true
+
+# configurations of the actuator /info endpoint
+info: 
+  app:
+    name: "Address Service"
+    description: "An address service instance."
+      
+---
+spring.profiles: cloud
+
+eureka:
+  client: 
+    serviceUrl:
+      defaultZone: ${eureka-server-url}/eureka  # URL of the form https://<unique prefix>-eureka-server.cfapps.eu10.hana.ondemand.com/eureka
+                                                # Resolved from environment set in manifest.yml
+  instance: 
+    ## This information will be part of the InstanceInfo returned by DiscoveryClient / EurekaClient.
+    ## Unfortunately, these have to be specified explicitly, since Eureka creates these URLs wrongly
+    ## when running on CF. 
+    ## See: https://cloud.spring.io/spring-cloud-netflix/multi/multi__service_discovery_eureka_clients.html
+    homePageUrl:          https://${vcap.application.uris[0]:localhost}/   
+    statusPageUrl:        https://${vcap.application.uris[0]:localhost}/actuator/info 
+    healthCheckUrl:       https://${vcap.application.uris[0]:localhost}/actuator/health
+    secureHealthCheckUrl: https://${vcap.application.uris[0]:localhost}/actuator/health
+    ## set the host name explicitly when in Cloud Foundry.
+    hostname:             ${vcap.application.uris[0]:localhost}
+    nonSecurePortEnabled: false
+    securePortEnabled:    true
+    securePort:           443
+    metadata-map:
+      # Adding information about the application GUID and app instance index to 
+      # each instance metadata. This will be used for setting the X-CF-APP-INSTANCE header
+      # to instruct Go-Router where to route.
+      cfAppGuid:       ${vcap.application.application_id}
+      cfInstanceIndex: ${INSTANCE_INDEX}
+    
+  
+    
+      
+
+
+

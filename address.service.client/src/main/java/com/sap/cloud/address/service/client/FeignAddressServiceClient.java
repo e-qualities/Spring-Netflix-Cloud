@@ -38,7 +38,7 @@ public class FeignAddressServiceClient {
     @Autowired
     private AddressServiceProxy addressServiceProxy;
 
-    @HystrixCommand(fallbackMethod = "onErrorFallback", commandKey = "address-service/address")
+    @HystrixCommand(fallbackMethod = "onErrorFallback", commandKey = "address-service/v1/address")
     public String getAddress() {
         Address address = addressServiceProxy.loadAddress();
         
@@ -64,7 +64,7 @@ public class FeignAddressServiceClient {
 // See: https://cloud.spring.io/spring-cloud-netflix/multi/multi_spring-cloud-feign.html#spring-cloud-feign-overriding-defaults
 @FeignClient(name = "address-service", configuration = DisableFeignHystrix.class) // 'address-service' is the name of the service in Eureka! 
 interface AddressServiceProxy {
-    @RequestMapping(method = RequestMethod.GET, value = "/address")
+    @RequestMapping(method = RequestMethod.GET, value = "/v1/address")
     Address loadAddress();
 }
 

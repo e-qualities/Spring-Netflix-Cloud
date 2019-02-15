@@ -10,6 +10,6 @@ import com.sap.cloud.address.service.client.Address;
 //exception that made the fallback necessary.
 @FeignClient(name = "address-service", fallbackFactory = HystrixClientFallbackFactory.class, contextId = "Address-Client-2")
 public interface HystrixAddressServiceProxyWithException {
-    @RequestMapping(method = RequestMethod.GET, value = "/address")
+    @RequestMapping(method = RequestMethod.GET, value = "/v1/address")
     Address loadAddress();
 }

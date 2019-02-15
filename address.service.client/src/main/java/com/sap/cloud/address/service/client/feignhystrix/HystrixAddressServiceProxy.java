@@ -13,6 +13,6 @@ import com.sap.cloud.address.service.client.Address;
 //
 @FeignClient(name = "address-service", fallback = HystrixAddressServiceProxyFallback.class, contextId = "Address-Client-1") 
 public interface HystrixAddressServiceProxy {
-    @RequestMapping(method = RequestMethod.GET, value = "/address")
+    @RequestMapping(method = RequestMethod.GET, value = "/v1/address")
     Address loadAddress();
 }

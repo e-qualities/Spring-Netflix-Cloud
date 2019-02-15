@@ -12,15 +12,8 @@ public class RESTEndpoint {
     
     private static final Logger logger = LoggerFactory.getLogger(RESTEndpoint.class);
     
-    @RequestMapping(value = "/address", method = RequestMethod.GET)
+    @RequestMapping(value = "/v1/address", method = RequestMethod.GET)
     public Address firstPage() throws Exception {
-        
-        // simulate random errors
-        if(Math.random() > .5) {
-            Thread.sleep(1500);
-            logger.info("Simulating random ADDRESS-SERVICE downtime.");
-            throw new RuntimeException("Simulating random ADDRESS-SERVICE downtime.");
-        }
         
         Address address = new Address();
         address.setCity("Heidelberg");
@@ -32,7 +25,7 @@ public class RESTEndpoint {
         return address;
     }
     
-    @RequestMapping(value = "/failing-address", method = RequestMethod.GET)
+    @RequestMapping(value = "/v1/failing-address", method = RequestMethod.GET)
     public Address failing() throws Exception {
         Thread.sleep(1500);
         logger.info("Simulating failing ADDRESS-SERVICE");

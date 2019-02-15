@@ -11,13 +11,14 @@
 
 	<modules>
 		<module>address.service</module>
+		<module>address.service.v2</module>
 		<module>address.service.client</module>
 		<module>employee.service</module>
 		<module>employee.service.client</module>
 		<module>eureka.service</module>
 		<module>zuul.service</module>
 		<module>hystrix-dashboard</module>
-    	<module>turbine</module>
-    	<module>diagnostics.service</module>
+    <module>turbine</module>
+    <module>diagnostics.service</module>
   </modules>
 </project>

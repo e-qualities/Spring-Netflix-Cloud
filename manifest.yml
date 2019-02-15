@@ -17,7 +17,7 @@ applications:
 ##
 ## Address Service
 ##
-- name: ((unique-prefix))-address-service
+- name: ((unique-prefix))-address-service-1.0.0
   memory: 1024M
   disk_quota: 512M
   instances: 1
@@ -26,7 +26,25 @@ applications:
   path: ./address.service/target/address.service-0.0.1-SNAPSHOT.jar
   
   routes: 
-  - route: ((unique-prefix))-address-service.((cf-domain))
+  - route: ((unique-prefix))-address-service-100.((cf-domain))
+ 
+  env:
+    spring.profiles.active: cloud # activate the spring profile named 'cloud'.
+    eureka-server-url: https://((eureka-server-route)) # referenced from application.yml 
+
+##
+## Address Service v.2.0.0
+##
+- name: ((unique-prefix))-address-service-2.0.0
+  memory: 1024M
+  disk_quota: 512M
+  instances: 1
+  buildpacks:
+    - java_buildpack
+  path: ./address.service.v2/target/address.service.v2-0.0.1-SNAPSHOT.jar
+  
+  routes: 
+  - route: ((unique-prefix))-address-service-200.((cf-domain))
   
   env:
     spring.profiles.active: cloud # activate the spring profile named 'cloud'.
