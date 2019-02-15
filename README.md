@@ -90,6 +90,12 @@ Table of Contents
          * [Maintaining Zone Information](#maintaining-zone-information)
       * [Ribbon in Action](#ribbon-in-action)
          * [Note for Cloud Foundry Deployments](#note-for-cloud-foundry-deployments)
+   * [Ribbon On Cloud Foundry](#ribbon-on-cloud-foundry)
+      * [Solution Description: Ribbon taking over load balancing from Go-Router](#solution-description-ribbon-taking-over-load-balancing-from-go-router)
+         * [Adding Required Metadata](#adding-required-metadata)
+         * [Adding the Load Balancing Request Interceptor](#adding-the-load-balancing-request-interceptor)
+      * [Trying It Out](#trying-it-out)
+      * [Summary](#summary)
    * [What's Next?](#whats-next)
    * [References](#references)
 
@@ -1898,6 +1904,195 @@ This will give you the flexibility to decide at runtime, which service (or servi
 
 If you are not 100% convinced yet, note that there is a way to deploy Ribbon to Cloud Foundry and take over the load balancing from Go-Router. This is shown in the `master-with-zuul-hystrix-turbine-ribbon-cf` branch and also described [here](https://github.com/TheFonz2017/Spring-Cloud-Netflix-Ribbon-CF-Routing).
 
+# Ribbon On Cloud Foundry
+
+In the previous section we have discussed how Ribbon's load balancing features are rendered useless when deployed to Cloud Foundry.
+
+In fact, there is a way to change this. The key to the solution is Cloud Foundry's [App Instance Routing](https://docs.cloudfoundry.org/concepts/http-routing.html#app-instance-routing) and is depicted below.
+
+![Ribbon-CF-App-Instance-Routing](.documentation/Ribbon-CF-App-Instance-Routing.png)
+
+Go-Router can be instructed to route to a particular application instance by using a custom header in outgoing HTTP requests.  
+The header's name is `X-CF-APP-INSTANCE` and its value needs to be a combination of the **application's GUID** and the **index** of the instance that the request should be routed to.
+
+Go-Router will look for this header and if present will route to the instance that was specified.
+
+This mechanism can be used in combination with Ribbon.  
+With Ribbon, we get the list of service instances from Eureka. And for each instance we also get their related metadata.  
+If we include the service GUID (i.e. the GUID of the Cloud Foundry application implementing the service) and the service instance's index in the metadata, we can extract that information using Ribbon. All we need to do then, is intercept all load balancing requests and inject a header that includes the required routing information for the service instance the request is for.
+
+This is will be shown for `address.service` and `address.service.client` and for `@LoadBalanced RestTemplates` only. In other words, what we are presenting in this section does **not** work for FeignClients.
+
+## Solution Description: Ribbon taking over load balancing from Go-Router
+
+### Adding Required Metadata
+
+First we need to add the application GUID and instance index information into the metadata of the service (instances).
+In `address.service`'s `application.yml` we do this as follows:
+
+```yaml
+...
+
+---
+spring.profiles: cloud
+
+eureka:
+  instance: 
+    metadata-map:
+      # Adding information about the application GUID and app instance index to 
+      # each instance metadata. This will be used for setting the X-CF-APP-INSTANCE header
+      # to instruct Go-Router where to route.
+      cfAppGuid:       ${vcap.application.application_id}
+      cfInstanceIndex: ${INSTANCE_INDEX}
+...
+
+```
+
+As you can see, we are declaring two new properties that will be available in metadata at runtime and we fill their values from the environment of the service (application). The service GUID is available from `VCAP_APPLICATION`'s `application_id` variable, the instance's index is available from the `INSTANCE_INDEX` environment variable. Both values will be injected by Spring cloud when run on Cloud Foundry.
+
+### Adding the Load Balancing Request Interceptor 
+
+Next, we need to create an interceptor that will add the appropriate header to load balancing requests. 
+To understand, how this is done, you need to understand that Spring Cloud does not use Ribbon to issue load balancing requests. In fact, Ribbon (which by default comes with its own REST client implementation) is **only** used for deciding which service instance to send the request to.  
+In other words, Ribbon is just used as the load balancing logic - but not as the HTTP client sending the requests. In particular, when Ribbon finds that a request should be retried, these retry requests are not sent by Ribbon, but by an HTTP client of Spring Cloud.
+
+Unfortunately, that means that you have to know which client Spring Cloud uses - and that differs depending on which HTTP client technology you are using (`RestTemplate` or `FeignClient`).
+
+For `RestTemplate`s, the way to intercept load balancing requests (including retry requests) is to create an implementation of `LoadBalancerRequestTransformer` and register it as a bean. [`CFLoadBalancerRequestTransformer`](./address.service.client/src/main/java/com/sap/address/service/client/cf/CFLoadBalancerRequestTransformer.java) does exactly that:
+
+```java
+public class CFLoadBalancerRequestTransformer implements LoadBalancerRequestTransformer {
+    public static final String CF_APP_GUID = "cfAppGuid";
+    public static final String CF_INSTANCE_INDEX = "cfInstanceIndex";
+    public static final String ROUTING_HEADER = "X-CF-APP-INSTANCE";
+
+    @Override
+    public HttpRequest transformRequest(HttpRequest request, ServiceInstance instance) {
+        
+        // First: Get the service instance information from the lower Ribbon layer.
+        //        This will include the actual service instance information as returned by Eureka. 
+        RibbonLoadBalancerClient.RibbonServer serviceInstanceFromRibbonLoadBalancer = (RibbonLoadBalancerClient.RibbonServer) instance;
+        
+        // Second: Get the the service instance from Eureka, which is encapsulated inside the Ribbon service instance wrapper.
+        DiscoveryEnabledServer serviceInstanceFromEurekaClient = (DiscoveryEnabledServer) serviceInstanceFromRibbonLoadBalancer.getServer();
+        
+        // Finally: Get access to all the cool information that Eureka provides about the service instance (including metadata and much more).
+        //          All of this is available for transforming the request now, if necessary.
+        InstanceInfo instanceInfo = serviceInstanceFromEurekaClient.getInstanceInfo();
+        
+        // If it's only the instance metadata you are interested in, you can also get it without explicitly down-casting as shown above.  
+        Map<String, String> metadata = instance.getMetadata();
+        System.out.println("Instance: " + instance);
+    
+        dumpServiceInstanceInformation(metadata, instanceInfo);
+        
+        if (metadata.containsKey(CF_APP_GUID) && metadata.containsKey(CF_INSTANCE_INDEX)) {
+            final String headerValue = String.format("%s:%s", metadata.get(CF_APP_GUID), metadata.get(CF_INSTANCE_INDEX));
+            
+            System.out.println("Returning Request with Special Routing Header");
+            System.out.println("Header Value: " + headerValue);
+            
+            // request.getHeaders might be immutable, so we return a wrapper that pretends to be the original request.
+            // and that injects an extra header.
+            return new CFLoadBalancerHttpRequestWrapper(request, headerValue);
+        }
+        
+        return request;
+    }
+}
+```
+The class will receive an `HttpRequest` and a `ServiceInstance`. The latter is the result of Ribbon choosing the instance to balance load to (you can customize this with custom `IRule` implementations, for example).
+
+`ServiceInstance` is a rather generic interface - Spring Cloud's common denominator over all possible load balancing frameworks. As a result, using the `ServiceInstance` interface only will not provide you access to all of the instance information returned by Eureka. For that to work, you need to explicitly down-cast the `ServiceInstance` object to the actual implementation, i.e. `RibbonLoadBalancerClient.RibbonServer`.  
+Then you call the `.getServer()` method and down-cast the returned object to the actual class containing the `InstanceInfo` object used by Eureka client.
+
+With `InstanceInfo` you now have full access to the metadata but also of all other information that was returned by Eureka.
+
+From the metadata, we look up the two newly introduced properties for application GUID and instance index and construct the CF routing header like so:
+
+```
+X-CF-APP-INSTANCE: <appGUID from metadata>:<instanceIndex from metadata>
+```
+
+Then we add the header to the request. 
+
+Note, that the request is once again wrapped - this is only for technical reasons and to be sure that injecting the custom routing header would also work in case the original request's header list were immutable.
+
+Finally, we need to declare a bean of `CFLoadBalancerRequestTransformer` in the Spring Boot application of `address.service.client`:
+
+```java
+@SpringBootApplication
+@EnableDiscoveryClient
+@EnableFeignClients
+@EnableCircuitBreaker
+public class ClientApp {
+    
+    ...
+
+    @Bean
+    public LoadBalancerRequestTransformer customRequestTransformer() {
+        return new CFLoadBalancerRequestTransformer();
+    }
+
+    ...
+}
+```
+
+This (re-)declares a bean of type `LoadBalancerRequestTransformer` that Spring will pick up and place into the load balancing request flow.  
+You can verify this in Spring's [`LoadBalancerAutoConfiguration`](https://github.com/spring-cloud/spring-cloud-commons/blob/master/spring-cloud-commons/src/main/java/org/springframework/cloud/client/loadbalancer/LoadBalancerAutoConfiguration.java).
+
+## Trying It Out
+
+To try out the solution and see the effect of it, you need to (re-)build and deploy `address.service` and `address.service.client`. You will also need a deployed Eureka instance.
+
+The effect of the solution is best seen when using the `RetryTestApp` as the main class of `address.service.client`, which will call an always failing endpoint of `address.service` and thus cause Ribbon to send and automatically retry requests.
+
+To do so, proceed as follows:
+1. In folder `address.service` execute `mvn clean package`, followed by a `cf push`. Note that `cf push` will start 3 instances of `address.service`.
+1. In folder `address.service.client` execute `./build-retry-test.sh` followed by `cf push`.
+1. Open two command lines, one tailing the logs of `address.service` and the other tailing those of `address.service.client` using `cf logs <appname>`.
+
+What you should see in the log output of `address.service` is 4 exception stack traces, that indicate that a failure is simulated.  
+There should be **exactly 4** exceptions, since Ribbon has been configured (in `address.service.client`'s `application.yml`) to retry requests once in case of failure and then try one other service instance. In total, this results in two requests for the first instance, and two for the next summing up to 4 requests.
+
+What you should also see, is that the first two exceptions go to the exact same instance, and the other two exceptions go to another (but same) service instance. You can see which instance a request is executed on, in the logs, by the number in `APP/PROC/WEB/<number>`:
+
+```
+2019-03-21T10:49:49.12+0100 [APP/PROC/WEB/0] OUT java.lang.RuntimeException: Simulating failing ADDRESS-SERVICE.
+...
+2019-03-21T10:49:50.70+0100 [APP/PROC/WEB/0] OUT java.lang.RuntimeException: Simulating failing ADDRESS-SERVICE.
+...
+2019-03-21T10:49:52.30+0100 [APP/PROC/WEB/1] OUT java.lang.RuntimeException: Simulating failing ADDRESS-SERVICE.
+...
+2019-03-21T10:49:53.90+0100 [APP/PROC/WEB/1] OUT java.lang.RuntimeException: Simulating failing ADDRESS-SERVICE.
+...
+```
+
+## Summary
+
+In this section we have shown how to run Ribbon on Cloud Foundry and taking over the routing and load balancing from Go-Router.  
+Generally, we would recommend to think twice about going into that direction. Besides fighting the platform, it is also not foreseeable if an overruled Go-Router might not still introduce issues that may interfere with Ribbon's load balancing.
+We believe, the safer option is to use Ribbon in combination with Go-Router - leaving the load balancing on a service *instance* level to the latter but using Ribbon to dynamically route / balance load on a service level.  
+Doing so, will make Ribbon an invaluable tool for realizing higher-level concepts like canary testing and zero-downtime deployments (see branch [master-with-zuul-hystrix-turbine-ribbon-cf-canarytesting](https://github.com/e-qualities/Spring-Netflix-Cloud/tree/master-with-zuul-hystrix-turbine-ribbon-cf-canarytesting)).
+
+When using Ribbon in combination with Go-Router, we recommend the following Ribbon and Hystrix configurations:
+
+```yaml 
+hystrix.command.default.execution.isolation.thread.timeoutInMilliseconds: 6500
+ribbon:
+  ConnectTimeout: 1000              # timeout for establishing a connection.
+  ReadTimeout: 2000                 # timeout for receiving data after connection is established.
+  MaxAutoRetries: 1                 # maximum number of retries ribbon will attempt in case of timeouts or errors.
+  MaxAutoRetriesNextServer: 0       # maximum number of other service instances to retry.
+  OkToRetryOnAllOperations: false   # disable retries for POST operations
+  retryableStatusCodes: 404,500     # retry when receiving these response status codes. Requires Spring Retry on the classpath.
+```
+Note that this disables Ribbon's feature to automatically retry failed requests on another service instance and limits the amount of retries on the same service instance to 1.  
+We do this, since on Cloud Foundry all service instances will have the same route - i.e. they will all look the same to Ribbon. Therefore Ribbon cannot control which instance retry requests will be sent to. Thus, the feature of retrying on a different instance is moot and can be switched off.
+
+Note that this configuration does not turn off Ribbon's load balancing rules - in fact, there may still be a service instance selection process in place. 
+This process, however, will be used for a different purpose than load balancing, and rather focus on doing service-level routing and realizing cloud-native qualities like zero-downtime and phased client migrations.
+
 # What's Next?
 
 Next, we will look into how ...
@@ -1955,3 +2150,18 @@ Next, we will look into how ...
   * [Good Ribbon Tutorial](https://piotrminkowski.wordpress.com/2017/05/15/part-3-creating-microservices-circuit-breaker-fallback-and-load-balancing-with-spring-cloud/)
   * [Netflix Ribbon Configurations](https://github.com/Netflix/ribbon/wiki/Getting-Started#the-properties-file-sample-clientproperties) | [Class](https://github.com/Netflix/ribbon/blob/master/ribbon-core/src/main/java/com/netflix/client/config/CommonClientConfigKey.java)
   * [Canary Testing with Ribbon / Passing Request Information to a Ribbon Rule](https://cloud.spring.io/spring-cloud-netflix/multi/multi_spring-cloud-ribbon.html#how-to-provdie-a-key-to-ribbon)
+* Ribbon on CF
+  * [Client Side Load Balancer: Ribbon](https://cloud.spring.io/spring-cloud-netflix/multi/multi_spring-cloud-ribbon.html)
+  * [Spring Cloud - LoadBalancerRequestTransformer](https://github.com/spring-cloud/spring-cloud-commons/blob/master/spring-cloud-commons/src/main/java/org/springframework/cloud/client/loadbalancer/LoadBalancerRequestTransformer.java)
+  * [Spring Cloud - LoadBalancerAutoConfiguration](https://github.com/spring-cloud/spring-cloud-commons/blob/master/spring-cloud-commons/src/main/java/org/springframework/cloud/client/loadbalancer/LoadBalancerAutoConfiguration.java)
+  * [Spring Cloud - RibbonAutoConfiguration](https://github.com/spring-cloud/spring-cloud-netflix/blob/master/spring-cloud-netflix-ribbon/src/main/java/org/springframework/cloud/netflix/ribbon/RibbonAutoConfiguration.java)
+  * [Spring Cloud - RibbonLoadBalancerClient](https://github.com/spring-cloud/spring-cloud-netflix/blob/master/spring-cloud-netflix-ribbon/src/main/java/org/springframework/cloud/netflix/ribbon/RibbonLoadBalancerClient.java)
+  * [Spring Cloud - RibbonClientConfiguration](https://github.com/spring-cloud/spring-cloud-netflix/blob/master/spring-cloud-netflix-ribbon/src/main/java/org/springframework/cloud/netflix/ribbon/RibbonClientConfiguration.java)
+  * [Spring Cloud - HttpClientRibbonConfiguration](https://github.com/spring-cloud/spring-cloud-netflix/blob/master/spring-cloud-netflix-ribbon/src/main/java/org/springframework/cloud/netflix/ribbon/apache/HttpClientRibbonConfiguration.java)
+  * [Pivotal - Surgical Routing Request Transformer](https://github.com/pivotal-cf/spring-cloud-services-connector/blob/master/spring-cloud-services-spring-connector/src/main/java/io/pivotal/spring/cloud/service/eureka/SurgicalRoutingRequestTransformer.java)
+  * [SpringClientFactory](https://github.com/spring-cloud/spring-cloud-netflix/blob/master/spring-cloud-netflix-ribbon/src/main/java/org/springframework/cloud/netflix/ribbon/SpringClientFactory.java)
+  * [Spring Cloud - RibbonClient](https://github.com/spring-cloud/spring-cloud-netflix/blob/master/spring-cloud-netflix-ribbon/src/main/java/org/springframework/cloud/netflix/ribbon/RibbonClient.java)
+  * [RibbonClientConfiguration isn't very useful](https://github.com/spring-cloud/spring-cloud-netflix/issues/935)
+  * [Ribbon: Unable to set default configuration using @RibbonClients(defaultConfiguration=...)](https://github.com/spring-cloud/spring-cloud-netflix/issues/374)
+  * [Understanding Application Context](https://spring.io/understanding/application-context)
+  * [Client Side Load Balancing with Ribbon and Spring Cloud](https://spring.io/guides/gs/client-side-load-balancing/)

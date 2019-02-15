@@ -70,11 +70,10 @@ eureka:
     #nonSecurePort:       80
     #preferIpAddress:     true
     metadataMap:
-      # Adding information about the application GUID to 
-      # each instance metadata. This could be used by Ribbon
-      applicationGUID: ${vcap.application.application_id}
-      # No need to replicate this information in metadata. 
-      # It is available from InstanceInfo.
-      # instanceId: "${vcap.application.instance_id:-}"
+      # Adding information about the application GUID and app instance index to 
+      # each instance metadata. This will be used for setting the X-CF-APP-INSTANCE header
+      # to instruct Go-Router where to route.
+      cfAppGuid:       ${vcap.application.application_id}
+      cfInstanceIndex: ${INSTANCE_INDEX}
 
 

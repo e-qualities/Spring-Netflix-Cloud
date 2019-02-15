@@ -152,4 +152,4 @@ applications:
   
   env:
     spring.profiles.active: cloud # activate the spring profile named 'cloud'.
-    eureka-server-url: https://((eureka-server-route)) # referenced from application.yml 
+    eureka-server-url: https://((eureka-server-route)) # referenced from application.yml

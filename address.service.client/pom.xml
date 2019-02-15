@@ -94,7 +94,7 @@
 	 <profile>
 	   <id>ribbon-retry-test</id>
 	   <properties>
-       <spring.boot.mainClass>com.sap.cloud.address.service.client.retrytest.RetryTest</spring.boot.mainClass>
+       <spring.boot.mainClass>com.sap.cloud.address.service.client.retrytest.RetryTestApp</spring.boot.mainClass>
      </properties>
 	 </profile>
 	</profiles>
