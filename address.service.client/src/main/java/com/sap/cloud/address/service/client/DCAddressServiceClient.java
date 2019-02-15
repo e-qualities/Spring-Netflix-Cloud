@@ -44,7 +44,7 @@ public class DCAddressServiceClient {
     @Autowired
     private EurekaClient eurekaClient;
 
-    @HystrixCommand(fallbackMethod = "onErrorFallback")
+    @HystrixCommand(fallbackMethod = "onErrorFallback", commandKey="address-service/address")
     public String getAddress() throws RestClientException, IOException {
         
         String baseUrlFromEurekaClient = getServiceURLwithEurekaClient();

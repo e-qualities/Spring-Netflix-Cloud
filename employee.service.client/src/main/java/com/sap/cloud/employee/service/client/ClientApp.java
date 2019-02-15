@@ -38,7 +38,6 @@ public class ClientApp {
         FeignEmployeeServiceClient feignEmployeeServiceClient = ctx.getBean(FeignEmployeeServiceClient.class);
         logger.info("{}", feignEmployeeServiceClient);
         feignEmployeeServiceClient.getEmployee();
-
     }
 
     @Bean

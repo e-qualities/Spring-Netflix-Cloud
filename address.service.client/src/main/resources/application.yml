@@ -11,6 +11,9 @@ eureka:
     serviceUrl:
       defaultZone: http://localhost:8761/eureka
   instance:
+    metadata-map:
+      version: 1.0.0
+      cluster: DEV            # Required by Turbine (see turbine project's application.yml)
     healthcheck: 
       enabled: true
 

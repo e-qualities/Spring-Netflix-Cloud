@@ -1,22 +1,16 @@
 ---
 spring:
   application:
-    name: employee-service-client
+    name: diagnostics-service
 
 server:
-  port: ${PORT:8083}
+  port: ${PORT:8777}
 
 eureka:
   client: 
     serviceUrl:
       defaultZone: http://localhost:8761/eureka
-  instance:
-    metadata-map:
-      version: 1.0.0
-      cluster: DEV          # Required by Turbine (see turbine project's application.yml)
-    healthcheck: 
-      enabled: true
-      
+
 # Expose all actuator / management endpoints. Don't use this in production.
 management.endpoints.web.exposure.include: "*"
 
@@ -27,7 +21,7 @@ management.endpoint.health.show-details: always
 # Enable implicit wrapping of FeignClient calls in Hystrix commands.
 # This is used by HystrixAddressServiceProxy.class and HystrixAddressServiceProxyWithException.class
 # See FeignAddressServiceClient.java for an example on how explicitly disable the implicit wrapping on a per-client basis.
-feign.hystrix.enabled: false  # only to show that hystrix can also be used explicitly, and feign without it.                 
+feign.hystrix.enabled: true                     
 
 # Adjust connection timeouts of Hystrix and Ribbon.
 # Make sure that Hystrix (the circuit breaker) times out later  
@@ -39,7 +33,7 @@ hystrix.command.default.execution.isolation.thread.timeoutInMilliseconds: 3500
 ribbon.ConnectTimeout: 1000 # timeout for establishing a connection.
 ribbon.ReadTimeout: 3000    # timeout for receiving data after connection is established.
 
-      
+
 ---
 spring.profiles: cloud
 
@@ -60,9 +54,6 @@ eureka:
     #nonSecurePort:       80
     #preferIpAddress:     true
     #metadataMap:
-    #  # No need to replicate this information in metadata. 
-    #  # It is available from InstanceInfo already:
-    #  instanceId: "${vcap.application.instance_id:-}"
-
+    #  instanceId: ${vcap.application.instance_id:-}
 
 

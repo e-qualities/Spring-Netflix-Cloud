@@ -67,6 +67,16 @@ Table of Contents
       * [Trying Out Hystrix](#trying-out-hystrix)
       * [The Need for Command Keys](#the-need-for-command-keys)
       * [Hystrix Alternatives](#hystrix-alternatives)
+   * [Turbine](#turbine)
+      * [Running Turbine](#running-turbine)
+      * [Integrating Turbine](#integrating-turbine)
+      * [Configuring Turbine](#configuring-turbine)
+      * [Using Clusters Properly](#using-clusters-properly)
+         * [Clustering by Landscape](#clustering-by-landscape)
+         * [Clustering by Service](#clustering-by-service)
+         * [Debugging Cluster Configurations](#debugging-cluster-configurations)
+      * [Registering Turbine Streams with Hystrix Dashboard](#registering-turbine-streams-with-hystrix-dashboard)
+      * [Turbine Limitations](#turbine-limitations)
    * [What's Next?](#whats-next)
    * [References](#references)
 
@@ -1262,6 +1272,293 @@ With Ribbon using Spring Retry (if it is on the classpath), the RestTemplate req
 
 Finally, if you are using FeignClient (which [integrates with Eureka](https://www.baeldung.com/spring-cloud-netflix-hystrix)) you can also profit from retries simply by putting Spring Retry on the classpath.
 
+# Turbine
+
+[Netflix Turbine](https://github.com/Netflix/Turbine) is an aggregator of streams (so-called Server-Sent Events (SSE)) and is used to aggregate the `/actuator/hystrix.stream` information provided by services that integrate Hystrix.  
+There is a [Turbine integration available in Spring Cloud Netflix](https://cloud.spring.io/spring-cloud-netflix/single/spring-cloud-netflix.html#_turbine). 
+
+The idea is simple: 
+- You configure turbine (using `application.yml`) with a list of service IDs that turbine should aggregate `hystrix.stream` information for.
+- Turbine integrates with Eureka and can subsequently look up service instances by their configured IDs.
+- Turbine then listens to the service instance's `/actuator/hystrix.stream` endpoints.
+- Turbine aggregates all the information and publishes it under one endpoint, `/turbine.stream`.
+- That Turbine stream URL (e.g. `http://turbine.domain.com/turbine.stream`) can be registered in a Hystrix Dashboard to present Hystrix information of all integrating services.
+
+## Running Turbine
+
+To run the `turbine` project:
+
+1. Open a terminal and go to the `turbine` folder
+1. Build `turbine` using `mvn clean package`
+1. Start `turbine` using `java -jar ./target/turbine-0.0.1-SNAPSHOT.jar`
+
+Turbine will look for configured services to aggregate their `/actuator/hystrix.stream` data. So make sure they are started as well.
+
+Out of the box the `turbine` project requires runnning instances of:
+1. `eureka.service`
+1. `address.service`
+1. `employee.service`
+1. `address.service.client`
+1. `employee.service.client`
+
+## Integrating Turbine
+
+Turbine can be realized as yet another Spring Boot application and you can choose the same application you used to bring up Hystrix Dashboard, if you like. We have chosen to create a separate application. You can find it in the [`turbine`](./turbine/) project.
+
+```java
+@SpringBootApplication
+@EnableTurbine
+public class App {
+    public static void main(String[] args) {
+        SpringApplication.run(App.class, args);
+    }
+}
+```
+
+You will need the following dependencies in your `pom.xml` (using the usual Spring Cloud BOM):
+
+```xml
+<dependency>
+  <groupId>org.springframework.cloud</groupId>
+  <artifactId>spring-cloud-starter-netflix-turbine</artifactId>
+</dependency>
+
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-actuator</artifactId>
+</dependency>
+```
+
+## Configuring Turbine
+
+The most relevant part, however, is the way you need to configure Turbine to aggregate the right services' `hystrix.stream`s.  
+As usual, you do this in `application.yml`.
+
+```yaml
+---
+spring:
+  application:
+    name: turbine
+
+server:
+  port: ${PORT:7777}
+  
+eureka:
+  client: 
+    serviceUrl:
+      defaultZone: http://localhost:8761/eureka
+      
+#
+# Simple Turbine Configuration: 
+# 1. You specify the Eureka service IDs of the services you want to monitor under 'appConfig'
+# 2. You specify a clusterNameExpression of 'default'.
+# Result: all defined services (and all their instances) are grouped together into a single 'default' cluster.  
+#
+turbine:
+  appConfig: ADDRESS-SERVICE-CLIENT,EMPLOYEE-SERVICE-CLIENT # DON'T USE SPACES AFTER COMMAS!
+  clusterNameExpression: "'default'"
+```
+
+This is the simplest configuration Turbine supports. It defines the `spring.application.name` and the `server.port` Turbine will run on.  
+Turbine integrates with Eureka and hence acts as a Eureka client. Therefore, `eureka.client.serviceUrl.defaultZone` needs to point to a running Eureka instance (or cluster).
+
+Turbine itself (in its most trivial form) is configured using `turbine.appConfig` - specifying a list of Eureka service IDs - and `clusterNameExpression` specifying a value of `"'default'"`.
+Turbine has the notion of *clusters*. Clusters are used to group hystrix streams from services into a logical unit.  
+In this case, all services are grouped together into one single (default) logical unit.
+
+You can access the stream of hytsrix events from all services in the `default` cluster like this `http://localhost:7777/turbine.stream`.
+
+## Using Clusters Properly
+
+### Clustering by Landscape
+
+[Typically, you use Turbine's clusters for grouping services by landscapes](https://github.com/Netflix/Turbine/wiki/Configuration-(1.x)#turbine-cluster-configuration) - i.e. you can define a cluster `DEV` which you assign services (or individual instances) to and another called `PROD` that you can assign the productive versions of your services to. You can use this configuration:
+
+```yaml
+clusters: DEV,PROD                                       # The possible clusters we want to monitor. DON'T USE SPACES AFTER COMMAS!
+services: ADDRESS-SERVICE-CLIENT,EMPLOYEE-SERVICE-CLIENT # The list of services we want to monitor at all. DON'T USE SPACES AFTER COMMAS!
+        
+turbine:
+  aggregator:
+    clusterConfig: ${clusters}
+  appConfig: ${services}
+  clusterNameExpression: "metadata['cluster']"           # This is used for matching services (defined in 'appConfig') to cluster names (defined in 'clusterConfig').
+```
+
+The way this configuration works is a follows:
+1. We define a list of possible clusters we want to monitor (DEV, PROD). These are used for `turbine.aggregator.clusterConfig`.
+2. We define the list of Eureka service IDs that should be monitored. These are used in `turbine.appConfig`.
+3. We define a `turbine.clusterNameExpression` that defines *based on which criterion* a service (instance) is assigned to one cluster or another.
+   In this case, we specify that each service instance will expose metadata (via `eureka.instance.metadata-map`) declaring a custom property named `cluster`.
+   The value of the `cluster` property has to be `DEV` or `PROD`. And based on it, the assignment to the cluster is done by Turbine.
+
+At runtime, Turbine will simply look up all the specified services in Eureka, inspect their metadata and assign them to the respective cluster. Streams of services from the same cluster are then aggregated.
+   
+Note, that you have to make sure that all services given in `turbine.appConfig` actually expose that custom `cluster` metadata with the proper values.  
+For example, in `application.yml` of `address.service.client` we added the following `eureka.instance.metadata-map`:
+
+```yaml
+eureka:
+  instance:
+    metadata-map:
+      cluster: DEV 
+```
+
+As a result, we can have two hystrix dashboards (one for `DEV`, one for `PROD`) pointing to the Turbine streams 
+- http://turbine:8888/turbine.stream?cluster=DEV
+- http://turbine:8888/turbine.stream?cluster=PROD
+
+### Clustering by Service
+
+By default, if you follow the simple descripions of Spring Cloud Netflix when configuring Turbine, you might end up with the following configuration:
+
+```yaml
+services: ADDRESS-SERVICE-CLIENT,EMPLOYEE-SERVICE-CLIENT 
+turbine:
+  aggregator:
+    clusterConfig: ${services}
+  appConfig: ${services} 
+```
+
+This assigns a cluster to every service - i.e. a one-to-one relation - and the cluster's name will be the Eureka service ID.
+
+Some people in the community argue that this is a better configuration, since it makes sure that you can have a Hystrix dashboard for *every service*, and in it aggregate all the `HystrixCommand`s that service is using to call its dependencies.
+
+Which clustering is best for your case, depends on what you would like to monitor.   
+Generally, you can create as many Hystrix dashboards as you like (e.g. using several browser tabs each pointing to a different  Hystrix dashboard URL, showing a different `/turbine.stream`).
+
+For example, you can have one dashboard pointing to `http://landscape-turbine.host:7777/turbine.stream?cluster=DEV`, and the other pointing to `http://landscape-turbine.host:7777/turbine.stream?cluster=PROD`.  
+
+Likewise, you could bring up another Turbine instance (e.g. `http://cluster-per-service-turbine.host:7778/`) with a cluster configuration that clusters per service and then create new Hystrix dashboards with the streams of each service.
+
+### Clustering by AWS Auto-Scaling Groups
+
+Amazon Web Services have the notion of Auto-Scaling Groups - i.e. groups of services that you can automatically scale out horizontally.
+
+Services and applications that belong to the same Auto-Scaling Group can be tagged with the `aSG` tag, and all those sharing the same value for the `aSG` tag belong to the same group.
+
+Eureka has the concept of `asgName` as part of its instance info - after all it was developed by Netflix and they use Eureka in the context of plain AWS. The `asgName` is a property on the `InstanceInfo` json object returned by Eureka (see section [Debugging Cluster Information](#debugging-cluster-information)).
+
+Turbine's integration with Eureka is based on a Netflix class described [here](https://github.com/Netflix/Turbine/wiki/Configuration-(1.x)#eurekainstancediscovery-impl) and re-used by Spring Cloud Netflix. This class - by default - tries to match service instances based on the `asgName` tag of each service. 
+
+Logically, this is similar to the following configuration:
+
+```
+turbine:
+  aggregator:
+    clusterConfig: MY-ASG-CLUSTER
+  appConfig: SERVICE-A,SERVICE-B,SERVICE-C
+  clusterNameExpression: "asgName"
+```
+
+Unfortunately, asgName is not set by Eureka automatically, but you could do that anytime using the `eureka.instance.asgName` property in your service's `application.yml` (see [more info here](https://github.com/spring-cloud/spring-cloud-netflix/issues/1816)).
+
+Note, that `asgName` is actually not part of the *custom* metadata, but of the `InstanceInfo` provided by Eureka for each service instance. If you spot anything else in that `InstanceInfo` you want to cluster by, you can do so, too.
+See the following section about how to inspect the `InstanceInfo` returned by Eureka.
+
+### Debugging Cluster Configurations
+
+For debugging, it may be helpful to see what clusters Turbine is aware of.  
+You can list all clusters that Turbine has configured, by calling the `/clusters` endpoint of the Turbine server (e.g. `http://turbine.domain.com/clusters`).
+
+We also provide an additional service as part of this repository which is located under [`diagnostics.service`](./diagnostics.service/).  
+This is a Spring Boot application that acts as a Eureka client and offers a simple rest endpoint to lookup service information of services that have registered with Eureka. To use it proceed as follows:
+1. Start the `diagnostics.service` with a Eureka instance running and other services running as well.
+2. Open your browser and point it to `http://localhost:8777/lookup/{serviceID}` replacing `{serviceID}` with a service's ID as registered in Eureka.
+3. The response will be a JSON structure that corresponds to the Eureka service information.  
+   Note, that this is the same information you can also query from Eureka using `EurekaClient` programmatically!
+
+This allows you to inspect the metadata of your service instances, and more information that may be relevant for Turbine configurations.  
+For example, `http://localhost:8777/lookup/address-service` yields the following JSON:
+
+```json
+[
+  {
+    "host": "c02tp3kshf1r.xxx.xxx.xxx.com",
+    "port": 8081,
+    "metadata": {
+      "management.port": "8081",
+      "jmx.port": "50938",
+      "cluster": "DEV"
+    },
+    "instanceId": "c02tp3kshf1r.xxx.xxx.xxx.com:address-service-client:8081",
+    "secure": false,
+    "serviceId": "ADDRESS-SERVICE-CLIENT",
+    "instanceInfo": {
+      "instanceId": "c02tp3kshf1r.xxx.xxx.xxx.com:address-service-client:8081",
+      "app": "ADDRESS-SERVICE-CLIENT",
+      "appGroupName": null,
+      "ipAddr": "10.87.12.2",
+      "sid": "na",
+      "homePageUrl": "http://c02tp3kshf1r.xxx.xxx.xxx.com:8081/",
+      "statusPageUrl": "http://c02tp3kshf1r.xxx.xxx.xxx.com:8081/actuator/info",
+      "healthCheckUrl": "http://c02tp3kshf1r.xxx.xxx.xxx.com:8081/actuator/health",
+      "secureHealthCheckUrl": null,
+      "vipAddress": "address-service-client",
+      "secureVipAddress": "address-service-client",
+      "countryId": 1,
+      "dataCenterInfo": {
+        "@class": "com.netflix.appinfo.InstanceInfo$DefaultDataCenterInfo",
+        "name": "MyOwn"
+      },
+      "hostName": "c02tp3kshf1r.xxx.xxx.xxx.com",
+      "status": "UP",
+      "overriddenStatus": "UNKNOWN",
+      "leaseInfo": {
+        "renewalIntervalInSecs": 30,
+        "durationInSecs": 90,
+        "registrationTimestamp": 1552041068851,
+        "lastRenewalTimestamp": 1552041308827,
+        "evictionTimestamp": 0,
+        "serviceUpTimestamp": 1552041068851
+      },
+      "isCoordinatingDiscoveryServer": false,
+      "metadata": {
+        "management.port": "8081",
+        "jmx.port": "50938",
+        "cluster": "DEV"
+      },
+      "lastUpdatedTimestamp": 1552041068851,
+      "lastDirtyTimestamp": 1552041068794,
+      "actionType": "ADDED",
+      "asgName": null
+    },
+    "uri": "http://c02tp3kshf1r.xxx.xxx.xxx.com:8081",
+    "scheme": null
+  }
+]
+```
+
+## Registering Turbine Streams with Hystrix Dashboard
+
+Turbine streams are not very readable - they are just streams of JSON. The true power of Turbine unfolds, when it is 
+combined with Hystrix Dashboard. For that, all you need to do, is register a Turbine stream in a Hystrix Dashboard.  
+
+To do so, proceed as follows:
+
+1. Make sure `eureka.service` is running.
+1. Make sure `address.service`, `employee.service`, `address.service.client` and `employee.service.client` are up and running.
+1. Make sure `hystrix-dashboard` is running.
+1. Start `turbine`.  
+   It will be available on `http://localhost:7777/` and offer aggregated service information by the following URL `http://localhost:8888/turbine.stream?cluster=DEV`
+3. Open a new browser tab and point it to a new Hystrix dashboard: `http://localhost:8999`.
+4. In the Hystrix dashboard, enter the Turbine stream URL `http://localhost:7777/turbine.stream?cluster=DEV`
+5. Specify a **Title** for the dashboard
+6. Press **Monitor** 
+
+This will bring up a dashboard similar to this one:
+
+![Hystrix-Turbine-Dashboard](.documentation/hystrix-turbine-dashboard.png)
+
+## Turbine Limitations
+
+If you followed the descriptions of Turbine closely, you may have recognised a small limitation:  
+Turbine aggregates streams by configuration. And it expects that you configure both the possible *clusters* that your services may be grouped in, as well as the *services* themselves (by their service IDs).  
+For scenarios, where you deploy a new service, this means you also need to extend the Turbine configuration and re-deploy Turbine so that it will pick up the new service for Hystrix stream aggregation.
+
+This can be a nuisance if you are running more than one Turbine server, e.g. when using different clustering approaches.
+Unfortunately, this will not be fixed in the future. But it may be an option to write your own Turbine configurations as Spring beans and provide a REST endpoint that allows you to modify them at runtime. See the [Spring Cloud Turbine documentation](https://cloud.spring.io/spring-cloud-netflix/single/spring-cloud-netflix.html#_turbine) and the [Netflix Turbine documentation](https://github.com/Netflix/Turbine/wiki/Configuration-(1.x)) for more information.
+
 # What's Next?
 
 Next, we will look into how 
@@ -1274,27 +1571,39 @@ Next, we will look into how
   * restrict access to services
 
 # References
-* [Spring Cloud Netflix Documentation](https://cloud.spring.io/spring-cloud-netflix/single/spring-cloud-netflix.html)
-* [Understanding Eureka Peer-2-Peer Communication](https://github.com/Netflix/eureka/wiki/Understanding-Eureka-Peer-to-Peer-Communication)
-* [Self Preservation: Why Eureka keeps showing warnings in the UI](https://groups.google.com/forum/#!searchin/eureka_netflix/chris/eureka_netflix/6pVPVjIMiG0/YAn3YrvWNN0J)
-* [NetflixOSS FAQ](https://github.com/cfregly/fluxcapacitor/wiki/NetflixOSS-FAQ)
-* [Using Custom Service Metadata](https://blog.codecentric.de/en/2018/01/spring-cloud-service-discovery-dynamic-metadata/)
-* [Cloud Foundry Headers to Route Requests to Specific Instances](https://docs.cloudfoundry.org/concepts/http-routing.html#app-instance-routing)
-* [Zuul](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_router_and_filter_zuul)
-* [Zuul Filters](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_disable_zuul_filters)
-* [Zuul Developer Guide](https://github.com/Netflix/zuul/wiki/How-it-Works)
-* [Spring Boot Actuator Endpoints](https://docs.spring.io/spring-boot/docs/current/actuator-api/html/)
-* [Spring Boot Actuator Endpoint List](https://docs.spring.io/spring-boot/docs/current/reference/htmlsingle/#production-ready-endpoints)
-* [Hystrix Spring Cloud Tutorial](https://www.youtube.com/watch?v=Kc7dDxn9cUg)
-* [Spring Cloud Hystrix Documentation](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_circuit_breaker_hystrix_clients)
-* [Hystrix Documentation](https://github.com/Netflix/Hystrix/wiki/How-To-Use)
-* [Hystrix-Javanica Documentation](https://github.com/Netflix/Hystrix/tree/master/hystrix-contrib/hystrix-javanica)
-* [Hystrix Configurations](https://github.com/Netflix/Hystrix/wiki/Configuration)
-* [Spring Open Feign](https://cloud.spring.io/spring-cloud-static/spring-cloud-openfeign/2.1.0.RELEASE/multi/multi_spring-cloud-feign.html) | [Latest Spring Open Feign Releases](https://spring.io/projects/spring-cloud-openfeign#learn) | [Netflix Open Feign](https://github.com/OpenFeign/feign)
-* [Feign Hystrix Support](https://cloud.spring.io/spring-cloud-static/spring-cloud-openfeign/2.1.0.RELEASE/multi/multi_spring-cloud-feign.html#spring-cloud-feign-hystrix)
-* [Microservice Registration and Discovery with Spring Cloud and Netflix's Eureka](https://spring.io/blog/2015/01/20/microservice-registration-and-discovery-with-spring-cloud-and-netflix-s-eureka)
-* https://www.javainuse.com/spring/springcloud
-* https://www.javainuse.com/spring/spring_eurekaregister
-* https://www.javainuse.com/spring/spring_eurekaregister2
-* https://www.javainuse.com/spring/spring_eurekaregister3
-* https://www.javainuse.com/spring/spring_eurekaregister4
+* Spring Cloud Netflix
+  * [Spring Cloud Netflix Documentation](https://cloud.spring.io/spring-cloud-netflix/single/spring-cloud-netflix.html)
+  * [NetflixOSS FAQ](https://github.com/cfregly/fluxcapacitor/wiki/NetflixOSS-FAQ)
+* Eureka  
+  * [Understanding Eureka Peer-2-Peer Communication](https://github.com/Netflix/eureka/wiki/Understanding-Eureka-Peer-to-Peer-Communication)
+  * [Self Preservation: Why Eureka keeps showing warnings in the UI](https://groups.google.com/forum/#!searchin/eureka_netflix/chris/eureka_netflix/6pVPVjIMiG0/YAn3YrvWNN0J)
+  * [Using Custom Service Metadata](https://blog.codecentric.de/en/2018/01/spring-cloud-service-discovery-dynamic-metadata/)
+  * [Microservice Registration and Discovery with Spring Cloud and Netflix's Eureka](https://spring.io/blog/2015/01/20/microservice-registration-and-discovery-with-spring-cloud-and-netflix-s-eureka)
+  * Eureka Tutorials
+    * https://www.javainuse.com/spring/springcloud
+    * https://www.javainuse.com/spring/spring_eurekaregister
+    * https://www.javainuse.com/spring/spring_eurekaregister2
+    * https://www.javainuse.com/spring/spring_eurekaregister3
+    * https://www.javainuse.com/spring/spring_eurekaregister4
+
+* Cloud Foundry: 
+  * [Cloud Foundry Headers to Route Requests to Specific Instances](https://docs.cloudfoundry.org/concepts/http-routing.html#app-instance-routing)
+* Zuul
+  * [Zuul](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_router_and_filter_zuul)
+  * [Zuul Filters](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_disable_zuul_filters)
+  * [Zuul Developer Guide](https://github.com/Netflix/zuul/wiki/How-it-Works)
+* Spring Boot Actuator
+  * [Spring Boot Actuator Endpoints](https://docs.spring.io/spring-boot/docs/current/actuator-api/html/)
+  * [Spring Boot Actuator Endpoint List](https://docs.spring.io/spring-boot/docs/current/reference/htmlsingle/#production-ready-endpoints)
+  * [Spring Open Feign](https://cloud.spring.io/spring-cloud-static/spring-cloud-openfeign/2.1.0.RELEASE/multi/multi_spring-cloud-feign.html) | [Latest Spring Open Feign Releases](https://spring.io/projects/spring-cloud-openfeign#learn) | [Netflix Open Feign](https://github.com/OpenFeign/feign)
+* Hystrix
+  * [Hystrix Spring Cloud Tutorial](https://www.youtube.com/watch?v=Kc7dDxn9cUg)
+  * [Spring Cloud Hystrix Documentation](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_circuit_breaker_hystrix_clients)
+  * [Hystrix Documentation](https://github.com/Netflix/Hystrix/wiki/How-To-Use)
+  * [Hystrix-Javanica Documentation](https://github.com/Netflix/Hystrix/tree/master/hystrix-contrib/hystrix-javanica)
+  * [Hystrix Configurations](https://github.com/Netflix/Hystrix/wiki/Configuration)
+  * [Feign Hystrix Support](https://cloud.spring.io/spring-cloud-static/spring-cloud-openfeign/2.1.0.RELEASE/multi/multi_spring-cloud-feign.html#spring-cloud-feign-hystrix)
+* Turbine
+  * [Spring Cloud Turbine Documentation](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_turbine)
+  * [Netflix Turbine Documentation](https://github.com/Netflix/Turbine/wiki/Getting-Started-(1.x)) | [Configuration](https://github.com/Netflix/Turbine/wiki/Configuration-(1.x))
+  * [Turbine Clusters and AWS](https://github.com/spring-cloud/spring-cloud-netflix/issues/1816)

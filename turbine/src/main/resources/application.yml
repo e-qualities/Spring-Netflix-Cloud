@@ -1,0 +1,83 @@
+---
+spring:
+  application:
+    name: turbine
+
+server:
+  port: ${PORT:7777}
+  
+eureka:
+  client: 
+    serviceUrl:
+      defaultZone: http://localhost:8761/eureka
+
+#
+# Simple Turbine Configuration: 
+# 1. You specify the Eureka service IDs of the services you want to monitor under 'appConfig'
+# 2. You specify a clusterNameExpression of 'default'.
+# Result: all defined services (and all their instances) are grouped together into a single 'default' cluster.  
+#
+#turbine:
+#  appConfig: ADDRESS-SERVICE-CLIENT,EMPLOYEE-SERVICE-CLIENT # DON'T USE SPACES AFTER COMMAS!
+#  clusterNameExpression: "'default'"
+
+
+#
+# More advanced Turbine Configuration:
+# 1. Define a list of possible clusters we will want to monitor (DEV, PROD) -> Use in 'turbine.aggregator.clusterConfig'
+# 2. Define the list of Eureka service IDs that should be monitored at all. -> Use in 'turbine.appConfig'
+# 3. Define a 'clusterNameExpression' that defines based on which criterion a service (instance) is assigned to which cluster. 
+#    In this case, we specify that each service instance will expose 'eureka.instance.metadata-map' declaring a custom property 'cluster'.
+#    That 'cluster' property has to have a value of either 'DEV' or 'PROD'. And based on it, the assignment to the cluster is done.
+#    Note, that you have to make sure all the services given in 'appConfig' expose that custom 'cluster' metadata with the proper values.
+#
+# Result: we can have two hystrix dashboards (one for DEV, one for PROD) pointing to the Turbine streams 
+# - http://turbine:8888/turbine.stream?cluster=DEV
+# - http://turbine:8888/turbine.stream?cluster=PROD
+#
+clusters: DEV,PROD                                       # The possible clusters we want to monitor. DON'T USE SPACES AFTER COMMAS!
+services: ADDRESS-SERVICE-CLIENT,EMPLOYEE-SERVICE-CLIENT # The list of services we want to monitor at all. DON'T USE SPACES AFTER COMMAS!
+        
+turbine:
+  aggregator:
+    clusterConfig: ${clusters}
+  appConfig: ${services}
+  clusterNameExpression: "metadata['cluster']"           # This is used for matching services (defined in 'appConfig') to cluster names (defined in 'clusterConfig').
+  
+#
+# In its simplest (but a bit ugly) configuration, there is one cluster per service having the name of the Eureka service instance.
+# 1. Define the list service IDs that we want to monitor.
+# 2. Use the list of service IDs for both 'turbine.aggregator.clusterConfig' and 'turbine.appConfig' 
+#
+#services: ADDRESS-SERVICE-CLIENT,EMPLOYEE-SERVICE-CLIENT # The list of services we want to monitor at all. DON'T USE SPACES AFTER COMMAS!
+#turbine:
+#  aggregator:
+#    clusterConfig: ${services}
+#  appConfig: ${services} 
+
+---
+spring.profiles: cloud
+
+eureka:
+  client: 
+    serviceUrl:
+      defaultZone: ${eureka-server-url}/eureka  # URL of the form https://<unique prefix>-eureka-server.cfapps.eu10.hana.ondemand.com/eureka
+                                                # Resolved from environment set in manifest.yml
+  instance:
+    ## This information will be part of the InstanceInfo returned by DiscoveryClient / EurekaClient.
+    ## Unfortunately, these have to be specified explicitly, since Eureka creates these URLs wrongly
+    ## when running on CF. 
+    ## See: https://cloud.spring.io/spring-cloud-netflix/multi/multi__service_discovery_eureka_clients.html
+    homePageUrl:          https://${vcap.application.uris[0]:localhost}/   
+    statusPageUrl:        https://${vcap.application.uris[0]:localhost}/actuator/info 
+    healthCheckUrl:       https://${vcap.application.uris[0]:localhost}/actuator/health
+    secureHealthCheckUrl: https://${vcap.application.uris[0]:localhost}/actuator/health
+    ## set the host name explicitly when in Cloud Foundry.
+    hostname:             ${vcap.application.uris[0]:localhost}
+    nonSecurePortEnabled: false
+    securePortEnabled:    true
+    securePort:           443
+    #nonSecurePort:       80
+    #preferIpAddress:     true
+    #metadataMap:
+    #  instanceId: ${vcap.application.instance_id:-}

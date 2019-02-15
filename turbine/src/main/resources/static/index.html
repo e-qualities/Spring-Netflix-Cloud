@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Turbine</title>
+<base href="/" />
+<link rel="stylesheet" type="text/css" href="/webjars/bootstrap/css/bootstrap.min.css" />
+<script type="text/javascript" src="/webjars/jquery/jquery.min.js"></script>
+<script type="text/javascript" src="/webjars/bootstrap/js/bootstrap.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <h1>Welcome to Turbine!</h1>
+    <p>
+    Turbine is aggregating Hystrix streams and provides you with one URL that you can copy and paste into a Hystrix Dashboard.
+    </p>
+    <p>
+    For example, the following streams show aggregated Hystrix information for services that have been clustered: <br/>
+    <ol>
+      <li> <a href="/turbine.stream?cluster=DEV">DEV Cluster</a> </li>
+      <li> <a href="/turbine.stream?cluster=PROD">PROD Cluster</a> </li>
+    </ol>
+    You can simply copy and paste these URLs into a hystrix dashboard.
+    </p>
+  </div>
+</body>
+</html>
