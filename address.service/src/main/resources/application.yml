@@ -28,6 +28,12 @@ eureka:
         }
     healthcheck: 
       enabled: true
+
+# configurations of the actuator /info endpoint
+info: 
+  app:
+    name: "Address Service"
+    description: "An address service instance."
       
 ---
 spring.profiles: cloud

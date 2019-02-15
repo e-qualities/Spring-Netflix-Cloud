@@ -14,6 +14,13 @@ eureka:
     healthcheck: 
       enabled: true
       
+# configurations of the actuator /info endpoint
+info: 
+  app:
+    name: "Employee Service"
+    description: "An employee service instance."
+
+      
 ---
 spring.profiles: cloud
 

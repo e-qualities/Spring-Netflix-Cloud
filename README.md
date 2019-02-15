@@ -43,6 +43,16 @@ Table of Contents
    * [What did we gain so far? - Or: Why The Hassle?](#what-did-we-gain-so-far---or-why-the-hassle)
    * [Using Custom Service Metadata](#using-custom-service-metadata)
       * [Static Custom Service Metadata](#static-custom-service-metadata)
+   * [Zuul](#zuul)
+      * [What is Zuul](#what-is-zuul)
+      * [Resiliency with Zuul](#resiliency-with-zuul)
+      * [Project Setup](#project-setup)
+         * [Zuul Spring Boot Application](#zuul-spring-boot-application)
+         * [Maven Dependencies](#maven-dependencies-1)
+         * [Zuul Configurations](#zuul-configurations)
+         * [Deploying Zuul Service](#deploying-zuul-service)
+         * [Testing Zuul](#testing-zuul)
+   * [What's Next?](#whats-next)
    * [References](#references)
 
 # Deployment
@@ -236,6 +246,7 @@ You can deploy Eureka Server and `address.service` in any order you like. They w
 If you have Eureka Server running, you can inspect `http://localhost:8761/eureka` or `https://<a unique ID>-eureka-server.<your.cf.domain>/eureka` respectively. This will show you the server's Web UI where you should see `address.service` registered now (together with information about the service instance(s)).
 
 #### Maven Dependencies
+
  In code there is nothing specific to Eureka.  
  However, you need to have the proper Eureka client dependencies on your classpath and in your `pom.xml`
 
@@ -683,6 +694,226 @@ eureka:
 **Note:** If you deploy `address.service` and `address.service.client`, you will see that when `address.service.client` starts up, it will look up an instance of `address-service` and print out the metadata it retrieved from the instance.  
 You can try this out locally, or on Cloud Foundry. The metadata is printed to standard output.
 
+# Zuul
+
+## What is Zuul
+[Netflix Zuul](https://github.com/Netflix/zuul/wiki) is a dynamic router, server-side loadbalancer and filter component that is used by Netflix as an edge router. Zuul can easily be integrated using [Spring Cloud Netflix](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_router_and_filter_zuul) and can act as a **dynamic edge router** and **API gateway**.
+
+Zuul and Eureka work hand in hand, using [Netflix Ribbon](https://github.com/Netflix/ribbon) under the hood to do load balancing across service instances that can **dynamically appear and disappear**. In other words, the picture (assuming you run only one Eureka and Zuul instance) looks like this:
+
+![Zuul-Eureka Overview](./.documentation/zuul-eureka.png)
+
+Eureka acts as the service registry, and new services (and instances thereof) register to Eureka whenever they are deployed / started. These services can also use Eureka to lookup other services and contact them directly.  
+Zuul uses Ribbon (a client-side loadbalancer) to route incoming requests the respective services and balance the load across multiple of their instances.  
+Ribbon acts as a Eureka client, and looks up services that have registered themselves (and all their instances). Ribbon does so dynamically, i.e. new services that are registered to Eureka will immediately be available for routing as well as load balancing.  
+Even more important: if services (or instances thereof) suddenly disappear as a result of failure, Ribbon can deal with that as well and balance load among the remaining ones.
+
+Zuul uses convention over configuration for routing to services. By default, a service that is registered by *user-service* will be available as a (potentially new) route on Zuul as '/user-service'. In other words, if the user service gets started, it registers itself to Eureka and might be accessible under `https://user-service-host:port/` for direct access. However, it will automatically be accessible via Zuul by the URL `https://zuul-host:port/user-service`.  
+Of course, you can restrict routes to not include certain service endpoints and completely change the default behaviour - up to the point where you manually configure a service whitelist Zuul will route to. But even without that, this dynamic behaviour can be a powerful tool.
+
+## Resiliency with Zuul
+
+Zuul uses Ribbon, which in turn uses Hystrix to enable circuit breaking. All requests issued by Zuul are therefore de-facto including circuit breaking.  
+The picture above shows a deployment with only one Eureka instance and one Zuul instance. In production environments you should have several instances running. Eureka is capable of forming a peer-to-peer network of instances that share service registry state - even across availability zones and regions. 
+
+## Project Setup
+
+Zuul is a plain Spring Boot application. You can find it in the [zuul.service](./zuul.service) folder.  
+You have to add the proper Maven dependencies to your `pom.xml` and configure Zuul's behaviour using an `application.yml`.
+
+### Zuul Spring Boot Application
+
+You can find the Spring Boot application incorporating Zuul server in [com.sap.cloud.zuul.service.App.java](./zuul.service/src/main/java/com/sap/cloud/zuul/service/App.java). All you need to enable Zuul server is the `@EnableZuulProxy` annotation.
+
+```java
+@SpringBootApplication
+@EnableZuulProxy
+public class App {
+    public static void main(String[] args) {
+        SpringApplication.run(App.class, args);
+    }
+}
+```
+For this to compile, you need to have the proper Maven dependencies on your classpath.
+
+### Maven Dependencies
+
+You need to add the following dependencies to your `pom.xml`:
+```xml
+  <dependency>
+    <groupId>org.springframework.cloud</groupId>
+    <artifactId>spring-cloud-starter-netflix-zuul</artifactId>
+  </dependency>
+  
+  <!-- 
+    Important: A Eureka Client needs to be on the classpath for Zuul to automatically detect
+    services registered to Eureka, and do an automatic routing based on registered service name.
+    E.g. a service registered as 'users' will be available as /users on the Zuul proxy and requests
+    will be forwarded to the 'users' service. 
+    -->
+  <dependency>
+    <groupId>org.springframework.cloud</groupId>
+    <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
+  </dependency>
+
+  <!-- 
+    Required for health checks and info pages of Zuul. This will make the /actuator/**
+    endpoints available on Zuul server.
+  -->
+  <dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-actuator</artifactId>
+  </dependency>
+```
+
+As usual with Spring Cloud projects, this relies on the Spring Cloud Dependencies BOM (see [`pom.xml`](./zuul.service/pom.xml)).
+Note, that there is a dependency to Eureka client declared as well. By default, Zuul (resp. Ribbon) does not act as a Eureka client. In fact you could hardcode the list of servers Ribbon knows in a configuration file that Ribbon will read. You could also use a different mechanism (than Eureka) for Ribbon to discover services and instances thereof.  
+However, since we would like Ribbon to lookup services from Eureka, we add the Eureka client libraries to the classpath, thereby effectively making `zuul.service` a Eureka client (like `address.service` service shown above).
+
+This also means that `zuul.service` needs to have Eureka client configurations. This will be covered in the next chapter.
+
+Finally, note, that also for the Zuul server we include the `spring-boot-starter-actuator` framework as well. This will allow us to get info and health metrics of Zuul under the endpoint `/actuator/{info|health|metrics|...}`.
+This will require a special route configuration for Zuul, as shown below.
+
+### Zuul Configurations
+
+```yaml
+---
+spring:
+  application:
+    name: zuul-service
+
+server:
+  port: ${PORT:8888}
+
+eureka:
+  client: 
+    serviceUrl:
+      defaultZone: http://localhost:8761/eureka
+
+# configurations of the actuator /info endpoint
+info: 
+  app:
+    name: "Zuul Edge Router"
+    description: "An edge router component based on Netflix Zuul."
+    
+management.endpoints.web.exposure.include: "*"
+
+zuul:
+  ignoredPatterns: /actuator/** # don't try forwarding requests that are pointed at /actuator/**,
+---
+spring.profiles: cloud
+
+eureka:
+  client: 
+    serviceUrl:
+      defaultZone: ${eureka-server-url}/eureka  # URL of the form https://<unique prefix>-eureka-server.cfapps.eu10.hana.ondemand.com/eureka
+                                                # Resolved from environment set in manifest.yml
+  instance:
+    homePageUrl:          https://${vcap.application.uris[0]:localhost}/   
+    statusPageUrl:        https://${vcap.application.uris[0]:localhost}/actuator/info 
+    healthCheckUrl:       https://${vcap.application.uris[0]:localhost}/actuator/health
+    secureHealthCheckUrl: https://${vcap.application.uris[0]:localhost}/actuator/health
+    ## set the host name explicitly when in Cloud Foundry.
+    hostname:             ${vcap.application.uris[0]:localhost}
+    nonSecurePortEnabled: false
+    securePortEnabled:    true
+    securePort:           443
+    metadataMap:
+      instanceId: ${vcap.application.instance_id:-}
+```
+The configuration above is purely for configuring the Eureka client facet of Zuul. It is analogous to `address.service` above.
+
+Note the `management.endpoints.web.exposure.include: "*"` directive, which takes care of exposing *all* `/actuator/` endpoints of Zuul. This allows you to inspect not only `/actuator/health` and `/actuator/info` but also `/actuator/routes`, `/actuator/routes/details` and `/actuator/filters` to get the routes and filters listed, respectively.
+**Generally, you should protect these endpoints.** See [this guide](https://docs.spring.io/spring-boot/docs/2.0.0.M7/reference/htmlsingle/#production-ready-endpoints-exposing-endpoints) for more info on how to do that.
+
+Note also the `zuul.ignoredPattern` configuration. This tells Zuul not to route any requests pointing to the `/actuator` endpoint. As a consequence, Zuul will try to serve that endpoint itself.
+
+Zuul comes with a variety of other configuration options from connection management and loadbalancing to routing. You can find these configurations [here](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_router_and_filter_zuul).
+
+### Deploying Zuul Service
+
+To run `zuul.service` locally, proceed as follows:
+
+* In zuul.service folder execute `mvn clean package`
+* Execute `java -jar ./target/zuul.service-0.0.1-SNAPSHOT.jar`
+
+To deploy to Cloud Foundry, proceed as follows:
+
+* Login to your account and space using `cf login`
+* In `zuul.service` folder, execute `mvn clean package`
+* Execute `cf push --vars-file ../manifest-variables.yml`
+
+See the [`manifest.yml`](./zuul.service/manifest.yml) for deployment settings and `manifest-variables.yml` for the values of variable placeholders in the manifest.yml.
+
+### Testing Zuul
+
+To test Zuul in action, you can choose a local deployment or deploy and test on Cloud Foundry.  
+Proceed as follows:
+
+* Deploy Eureka Server (as described above)
+* Deploy one or more services (as described above)
+* Deploy `zuul.service` (as described above)
+
+Once all components are deployed and have registered / discovered one another, you can access services via Zuul.
+For example, for a local deployment, Zuul will have the address `http://localhost:8888`. If you deployed `address.service` locally as well and it has registered itself with Eureka, then it will be (directly) available by the URL `http://localhost:8080` and its info-endpoint will be accessible by `http://localhost:8080/actuator/info`.  
+Rather than calling `address.service` directly, you can now call it through Zuul using the following (dynamically generated) route: `http://localhost:8888/address-service/actuator/info`.
+
+## Advanced Zuul Configurations
+
+Zuul comes with a variety of configurations. For a detailed description see [this page](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_router_and_filter_zuul).
+
+In the sample `zuul.service` we have added some additional configurations that are commented out. 
+
+```yaml
+zuul:
+  sensitiveHeaders:    # - Empty list! This will allow ALL headers to be forwarded by Zuul. Use this with care!
+  routes:
+    address-service:             
+      path: /addresses/**        
+      #stripPrefix: false        
+    employee-service:            
+      path: /employees/**        
+    legacy:                      
+      path: /**                  
+      serviceId: old_address_service     
+    external:
+      path: /external/**
+      url: http://example.com/external_service
+      sensitiveHeaders: Cookie,Set-Cookie,Authorization # default for sensitive headers: do NOT forward these headers to downstream services!
+```
+
+The configuration above declares explicit routes for the services named `address-service` and `employee-service` and assigns custom path prefixes to them. As a result, both services will be accessible by calling Zuul with a path of `/addresses/` and `/employees/`, respectively. This configuration also implicitly assumes that the service names `address-service` and `employee-service` are registered names in Eureka. 
+
+The `legacy` node specifies as service and a path, and specifies the explicit service ID of the service in Eureka.  
+In this case, `legacy` is just the name of the route, and requests pointed to Zuul's root path `/` are forwarded to the service named `old_address_service`.
+
+Finally, note the `external` node which declares a path component that will route all incoming requests to an external URL. Here the `sensitiveHeaders` property that was declared directly under the `zuul` node is overridden by the route-specific `sensitiveHeaders`. While the global configuration would allow all headers (empty sensitive set) to be forwarded, this rule will not forward the headers `Cookie`, `Set-Cookie` and `Authorization` which may contain sensitive data that should not leave the system.
+
+### Location Header Rewriting
+
+If Zuul is fronting a web application, you may need to re-write the `Location` header when the web application redirects through a HTTP status code of `3XX`. 
+
+See [more information here](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#zuul-redirect-location-rewrite). 
+
+### Cross Origin Requests
+
+By default Zuul routes all Cross Origin requests (CORS) to the services. If you want instead Zuul to handle these requests it can be done by providing custom `WebMvcConfigurer` bean.
+
+See [more information here](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_enabling_cross_origin_requests).
+
+
+# What's Next?
+
+Next, we will look into how Zuul can be configured to
+* support in canary testing
+* blue-green deployments
+* zero downtime
+* authenticate client requests
+* restrict access to services
+
+But before that, we will add a little bit of Hystrix, to make our services more resilient.
+
 # References
 * [Spring Cloud Netflix Documentation](https://cloud.spring.io/spring-cloud-netflix/single/spring-cloud-netflix.html)
 * [Understanding Eureka Peer-2-Peer Communication](https://github.com/Netflix/eureka/wiki/Understanding-Eureka-Peer-to-Peer-Communication)
@@ -690,6 +921,11 @@ You can try this out locally, or on Cloud Foundry. The metadata is printed to st
 * [NetflixOSS FAQ](https://github.com/cfregly/fluxcapacitor/wiki/NetflixOSS-FAQ)
 * [Using Custom Service Metadata](https://blog.codecentric.de/en/2018/01/spring-cloud-service-discovery-dynamic-metadata/)
 * [Cloud Foundry Headers to Route Requests to Specific Instances](https://docs.cloudfoundry.org/concepts/http-routing.html#app-instance-routing)
+* [Zuul](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_router_and_filter_zuul)
+* [Zuul Filters](https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#_disable_zuul_filters)
+* [Zuul Developer Guide](https://github.com/Netflix/zuul/wiki/How-it-Works)
+* [Spring Boot Actuator Endpoints](https://docs.spring.io/spring-boot/docs/current/actuator-api/html/)
+* [Spring Boot Actuator Endpoint List](https://docs.spring.io/spring-boot/docs/current/reference/htmlsingle/#production-ready-endpoints)
 * https://www.javainuse.com/spring/springcloud
 * https://www.javainuse.com/spring/spring_eurekaregister
 * https://www.javainuse.com/spring/spring_eurekaregister2

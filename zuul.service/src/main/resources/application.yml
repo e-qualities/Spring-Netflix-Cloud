@@ -1,0 +1,73 @@
+---
+spring:
+  application:
+    name: zuul-service
+
+server:
+  port: ${PORT:8888}
+
+eureka:
+  client: 
+    serviceUrl:
+      defaultZone: http://localhost:8761/eureka
+
+# configurations of the actuator /info endpoint
+info: 
+  app:
+    name: "Zuul Edge Router"
+    description: "An edge router component based on Netflix Zuul."
+    
+management.endpoints.web.exposure.include: "*"
+
+zuul:
+  #ignoreSecurityHeaders: false   # - use in combination with Spring Security if you want security headers set by BE services.
+  #sensitiveHeaders:              # - will allow ALL headers to be forwarded by Zuul. Use this with care!
+  ignoredPatterns: /actuator/**   # don't try forwarding requests that are pointed at /actuator/**,
+                                  # since this is Zuuls own actuator endpoint.
+#  #ignoredServices: '*'          # - will not forward any requests.
+#  routes:
+#    address-service:             # name of the service as found in Eureka registry
+#      path: /addresses/**        # path to map it to.
+#      #stripPrefix: false        # - will forward the path prefix to the target service
+#    employee-service:            # name of the service as found in Eureka registry
+#      path: /employees/**        # path to map it to.        
+#    legacy:                      # some legacy service
+#      path: /**                  # path to map it to. Note that this path is containing the  
+#                                 # paths above and therefore needs to be specified last as 
+#                                 # otherwise it would override the other paths.
+#      serviceId: old_address     # the name of the service as found in Eureka registry 
+#    external:
+#      path: /external/**
+#      url: http://example.com/external_service          # route to an external URL. This is NOT using hystrix by default.  
+#                                                        # See: https://cloud.spring.io/spring-cloud-static/spring-cloud-netflix/2.1.0.RELEASE/single/spring-cloud-netflix.html#netflix-zuul-reverse-proxy
+#      sensitiveHeaders: Cookie,Set-Cookie,Authorization # make sure these headers are not forwarded to the external service.
+---
+spring.profiles: cloud
+
+eureka:
+  client: 
+    serviceUrl:
+      defaultZone: ${eureka-server-url}/eureka  # URL of the form https://<unique prefix>-eureka-server.cfapps.eu10.hana.ondemand.com/eureka
+                                                # Resolved from environment set in manifest.yml
+  instance:
+    ## This information will be part of the InstanceInfo returned by DiscoveryClient / EurekaClient.
+    ## Unfortunately, these have to be specified explicitly, since Eureka creates these URLs wrongly
+    ## when running on CF. 
+    ## See: https://cloud.spring.io/spring-cloud-netflix/multi/multi__service_discovery_eureka_clients.html
+    homePageUrl:          https://${vcap.application.uris[0]:localhost}/   
+    statusPageUrl:        https://${vcap.application.uris[0]:localhost}/actuator/info 
+    healthCheckUrl:       https://${vcap.application.uris[0]:localhost}/actuator/health
+    secureHealthCheckUrl: https://${vcap.application.uris[0]:localhost}/actuator/health
+    ## set the host name explicitly when in Cloud Foundry.
+    hostname:             ${vcap.application.uris[0]:localhost}
+    nonSecurePortEnabled: false
+    securePortEnabled:    true
+    securePort:           443
+    #nonSecurePort:       80
+    #preferIpAddress:     true
+    metadataMap:
+      instanceId: ${vcap.application.instance_id:-}
+
+
+
+
